@@ -26,6 +26,7 @@ android {
 }
 
 dependencies {
-    val cloudstreamApi = "pre-release"
+    // pre-release yerine -SNAPSHOT kullanıyoruz
+    val cloudstreamApi = "-SNAPSHOT"
     implementation("com.github.recloudstream:cloudstream:$cloudstreamApi")
 }
