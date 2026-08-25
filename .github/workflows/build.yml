@@ -24,7 +24,7 @@ jobs:
           cache-disabled: true
 
       - name: Build Plugins
-        run: gradle make
+        run: gradle make -Pandroid.useAndroidX=true -Pandroid.enableJetifier=true
 
       - name: Upload Artifacts
         uses: actions/upload-artifact@v4
