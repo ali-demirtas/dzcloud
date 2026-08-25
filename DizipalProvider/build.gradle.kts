@@ -4,6 +4,8 @@ plugins {
     id("com.lagradost.cloudstream3.gradle")
 }
 
+version = 1
+
 cloudstream {
     setRepo("https://github.com/ali-demirtas/dzcloud")
     authors = listOf("ali-demirtas")
@@ -27,8 +29,7 @@ android {
 }
 
 dependencies {
-    val cloudstreamApi = "-SNAPSHOT"
-    implementation("com.github.recloudstream.cloudstream:library:$cloudstreamApi")
-    implementation("com.github.Blatzar:NiceHttp:0.4.18")
+    compileOnly("com.github.recloudstream:cloudstream:master-SNAPSHOT")
+    compileOnly("com.github.Blatzar:NiceHttp:0.4.18")
     implementation("org.jsoup:jsoup:1.17.2")
 }
