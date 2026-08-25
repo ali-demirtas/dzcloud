@@ -22,11 +22,12 @@ android {
     }
     kotlinOptions {
         jvmTarget = "1.8"
+        freeCompilerArgs = listOf("-Xskip-metadata-version-check")
     }
 }
 
 dependencies {
-    // pre-release yerine -SNAPSHOT kullanıyoruz
     val cloudstreamApi = "-SNAPSHOT"
     implementation("com.github.recloudstream:cloudstream:$cloudstreamApi")
+    implementation("org.jsoup:jsoup:1.17.2")
 }
