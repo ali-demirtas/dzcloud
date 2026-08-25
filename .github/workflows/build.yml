@@ -1,9 +1,12 @@
-name: Build Plugins
+name: Build and Deploy Plugins
 
 on:
   push:
     branches: [ master, main ]
   workflow_dispatch:
+
+permissions:
+  contents: write
 
 jobs:
   build:
@@ -26,10 +29,8 @@ jobs:
       - name: Build Plugins
         run: gradle make -Pandroid.useAndroidX=true -Pandroid.enableJetifier=true
 
-      - name: Upload Artifacts
-        uses: actions/upload-artifact@v4
+      - name: Deploy to Builds Branch
+        uses: JamesIves/github-pages-deploy-action@v4
         with:
-          name: Cloudstream-Plugins
-          path: |
-            **/*.cs3
-            **/plugins.json
+          folder: build
+          branch: builds
