@@ -1,0 +1,16 @@
+[
+    {
+        "fileHash": "sha256-b5e57c61b3b20eb6f38ce214e515860ce7521d221eec9696d29e5684c8bd3484",
+        "apiVersion": 1,
+        "repositoryUrl": "https://github.com/ali-demirtas/dzcloud",
+        "fileSize": 12090,
+        "status": 3,
+        "authors": [
+            "ali-demirtas"
+        ],
+        "version": 1,
+        "internalName": "DizipalProvider",
+        "url": "https://raw.githubusercontent.com/ali-demirtas/dzcloud/builds/DizipalProvider.cs3",
+        "name": "DizipalProvider"
+    }
+]
