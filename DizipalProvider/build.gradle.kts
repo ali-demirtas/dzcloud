@@ -29,5 +29,6 @@ android {
 dependencies {
     val cloudstreamApi = "-SNAPSHOT"
     implementation("com.github.recloudstream:cloudstream:$cloudstreamApi")
+    implementation("com.github.Blatzar:NiceHttp:0.4.18")
     implementation("org.jsoup:jsoup:1.17.2")
 }
