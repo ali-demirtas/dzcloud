@@ -2,7 +2,6 @@ package com.dizipal
 
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
-import org.jsoup.Jsoup
 import org.jsoup.nodes.Element
 
 class DizipalProvider : MainAPI() {
@@ -19,7 +18,7 @@ class DizipalProvider : MainAPI() {
 
         val sections = document.select("div.section, div.module, div.content-wrapper")
         if (sections.isNotEmpty()) {
-            sections.forEach { section ->
+            for (section: Element in sections) {
                 val title = section.selectFirst("h2, h3, .section-title")?.text()?.trim() ?: "İçerikler"
                 val items = section.select("article, div.poster, div.movie-card, .item").mapNotNull { it.toSearchResult() }
                 if (items.isNotEmpty()) {
@@ -59,7 +58,7 @@ class DizipalProvider : MainAPI() {
         val isSeries = episodeElements.isNotEmpty() || url.contains("/dizi/")
 
         return if (isSeries) {
-            val episodes = episodeElements.mapIndexed { index, element ->
+            val episodes = episodeElements.mapIndexed { index: Int, element: Element ->
                 val epUrl = fixUrl(element.attr("href"))
                 val epName = element.selectFirst(".name, .title")?.text()?.trim() ?: element.text().trim()
                 
@@ -97,15 +96,15 @@ class DizipalProvider : MainAPI() {
         val document = app.get(data).document
         val iframes = mutableListOf<String>()
 
-        document.select("iframe").forEach { iframe ->
-            val src = iframe.attr("src").takeIf { it.isNotEmpty() } ?: iframe.attr("data-src")
-            if (!src.isNullOrEmpty()) {
+        document.select("iframe").forEach { iframe: Element ->
+            val src = if (iframe.attr("src").isNotEmpty()) iframe.attr("src") else iframe.attr("data-src")
+            if (src.isNotEmpty()) {
                 iframes.add(fixUrl(src))
             }
         }
 
-        document.select(".sources-list a, .player-options a, [data-frame]").forEach { btn ->
-            val frameSrc = btn.attr("data-frame").takeIf { it.isNotEmpty() } ?: btn.attr("href")
+        document.select(".sources-list a, .player-options a, [data-frame]").forEach { btn: Element ->
+            val frameSrc = if (btn.attr("data-frame").isNotEmpty()) btn.attr("data-frame") else btn.attr("href")
             if (frameSrc.isNotEmpty() && !frameSrc.startsWith("#")) {
                 iframes.add(fixUrl(frameSrc))
             }
