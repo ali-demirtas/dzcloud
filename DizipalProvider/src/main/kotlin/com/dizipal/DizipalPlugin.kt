@@ -7,7 +7,6 @@ import android.content.Context
 @CloudstreamPlugin
 class DizipalPlugin: Plugin() {
     override fun load(context: Context) {
-        // Provider sınıfınızı buraya kaydedin
         registerMainAPI(DizipalProvider())
     }
 }
