@@ -27,10 +27,15 @@ jobs:
           cache-disabled: true
 
       - name: Build Plugins
-        run: gradle make -Pandroid.useAndroidX=true -Pandroid.enableJetifier=true
+        run: |
+          gradle make -Pandroid.useAndroidX=true -Pandroid.enableJetifier=true
+          mkdir -p deploy
+          cp -r DizipalProvider/build/*.cs3 deploy/ || true
+          cp -r DizipalProvider/build/*.json deploy/ || true
+          cp -r build/*.json deploy/ || true
 
       - name: Deploy to Builds Branch
         uses: JamesIves/github-pages-deploy-action@v4
         with:
-          folder: build
+          folder: deploy
           branch: builds
