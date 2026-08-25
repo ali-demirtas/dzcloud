@@ -1,0 +1,168 @@
+package com.dizipal
+
+import com.lagradost.cloudstream3.*
+import com.lagradost.cloudstream3.utils.*
+import org.jsoup.nodes.Element
+
+class DizipalProvider : MainAPI() {
+    override var mainUrl = "https://dizipal2301.com"
+    override var name = "Dizipal"
+    override val supportedTypes = setOf(TvType.Movie, TvType.TvSeries)
+    override var lang = "tr"
+    override val hasMainPage = true
+
+    // --- 1. ANA SAYFA ---
+    override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
+        val document = app.get(mainUrl).document
+        val homeLists = mutableListOf<HomePageList>()
+
+        // Popüler / Son Eklenen bölümleri
+        val sections = document.select("div.section, div.module, div.content-wrapper")
+
+        if (sections.isNotEmpty()) {
+            sections.forEach { section ->
+                val title = section.selectFirst("h2, h3, .section-title")?.text()?.trim() ?: "İçerikler"
+                val items = section.select("article, div.poster, div.movie-card, .item").mapNotNull { it.toSearchResult() }
+                if (items.isNotEmpty()) {
+                    homeLists.add(HomePageList(title, items))
+                }
+            }
+        } else {
+            // Genel liste ayrıştırma
+            val items = document.select("article, div.poster, div.movie-card, .item").mapNotNull { it.toSearchResult() }
+            if (items.isNotEmpty()) {
+                homeLists.add(HomePageList("Öne Çıkanlar", items))
+            }
+        }
+
+        return HomePageResponse(homeLists)
+    }
+
+    // --- 2. ARAMA ---
+    override suspend fun search(query: String): List<SearchResponse> {
+        val searchUrl = "$mainUrl/search?q=$query"
+        val document = app.get(searchUrl).document
+
+        return document.select("article, div.poster, div.search-result, .item").mapNotNull {
+            it.toSearchResult()
+        }
+    }
+
+    // --- 3. DETAY VE BÖLÜM YÜKLEME ---
+    override suspend fun load(url: String): LoadResponse {
+        val document = app.get(url).document
+
+        val title = document.selectFirst("h1, .entry-title, .title")?.text()?.trim() ?: "Bilinmeyen Başlık"
+        val poster = fixUrlNull(document.selectFirst(".poster img, .cover img, img.entry-thumb")?.attr("src") ?: document.selectFirst("meta[property=og:image]")?.attr("content"))
+        val description = document.selectFirst(".description, .overview, .entry-content p, #sinopsis")?.text()?.trim()
+        val year = document.selectFirst(".release-year, .year, .date")?.text()?.trim()?.toIntOrNull()
+
+        // Sayfada bölüm listesi var mı kontrol et
+        val episodeElements = document.select(".episodes a, .episode-item, div.episodes-list a, li.episode")
+        val isSeries = episodeElements.isNotEmpty() || url.contains("/dizi/")
+
+        return if (isSeries) {
+            val episodes = episodeElements.mapIndexed { index, element ->
+                val epUrl = fixUrl(element.attr("href"))
+                val epName = element.selectFirst(".name, .title")?.text()?.trim() ?: element.text().trim()
+                
+                // Sezon / Bölüm numarasını tespit etme
+                val seasonNum = Regex("(\\d+)\\.\\s*Sezon", RegexOption.IGNORE_CASE).find(epName)?.groupValues?.get(1)?.toIntOrNull() ?: 1
+                val epNum = Regex("(\\d+)\\.\\s*Bölüm", RegexOption.IGNORE_CASE).find(epName)?.groupValues?.get(1)?.toIntOrNull() ?: (index + 1)
+
+                Episode(
+                    data = epUrl,
+                    name = epName,
+                    season = seasonNum,
+                    episode = epNum
+                )
+            }
+
+            newTvSeriesLoadResponse(title, url, TvType.TvSeries, episodes) {
+                this.posterUrl = poster
+                this.plot = description
+                this.year = year
+            }
+        } else {
+            newMovieLoadResponse(title, url, TvType.Movie, url) {
+                this.posterUrl = poster
+                this.plot = description
+                this.year = year
+            }
+        }
+    }
+
+    // --- 4. VİDEO LİNKLERİNİ AYRIŞTIRMA (EXTRACTOR) ---
+    override suspend fun loadLinks(
+        data: String,
+        isCasting: Boolean,
+        subtitleCallback: (SubtitleFile) -> Unit,
+        callback: (ExtractorLink) -> Unit
+    ): Boolean {
+        val document = app.get(data).document
+
+        // Sitedeki olası video iframe'lerini topla
+        val iframes = mutableListOf<String>()
+        
+        document.select("iframe").forEach { iframe ->
+            val src = iframe.attr("src").takeIf { it.isNotEmpty() } ?: iframe.attr("data-src")
+            if (!src.isNullOrEmpty()) {
+                iframes.add(fixUrl(src))
+            }
+        }
+
+        // Alternatif player butonları / kaynak linkleri
+        document.select(".sources-list a, .player-options a, [data-frame]").forEach { btn ->
+            val frameSrc = btn.attr("data-frame").takeIf { it.isNotEmpty() } ?: btn.attr("href")
+            if (frameSrc.isNotEmpty() && !frameSrc.startsWith("#")) {
+                iframes.add(fixUrl(frameSrc))
+            }
+        }
+
+        // Her iframe kaynağını çözümle
+        for (iframeUrl in iframes.distinct()) {
+            when {
+                // Doğrudan m3u8 veya video dosyası barındıran embedler
+                iframeUrl.contains(".m3u8") -> {
+                    callback.invoke(
+                        ExtractorLink(
+                            name,
+                            "Dizipal HLS",
+                            iframeUrl,
+                            referer = mainUrl,
+                            quality = Qualities.Unknown.value,
+                            isM3u8 = true
+                        )
+                    )
+                }
+                // Harici Extractor servisleri (Vidmoly, RapidVideo, Filemoon vb.)
+                else -> {
+                    loadExtractor(iframeUrl, subtitleCallback, callback)
+                }
+            }
+        }
+
+        return iframes.isNotEmpty()
+    }
+
+    // --- YARDIMCI ELEMENT AYRIŞTIRICI ---
+    private fun Element.toSearchResult(): SearchResponse? {
+        val linkElem = if (this.tagName() == "a") this else this.selectFirst("a") ?: return null
+        val href = fixUrl(linkElem.attr("href"))
+        val title = this.selectFirst(".title, h2, h3, .name")?.text()?.trim() ?: linkElem.text().trim()
+        if (title.isEmpty()) return null
+
+        val posterUrl = fixUrlNull(this.selectFirst("img")?.attr("data-src") ?: this.selectFirst("img")?.attr("src"))
+        val isSeries = href.contains("/dizi/")
+
+        return if (isSeries) {
+            newTvSeriesSearchResponse(title, href, TvType.TvSeries) {
+                this.posterUrl = posterUrl
+            }
+        } else {
+            newMovieSearchResponse(title, href, TvType.Movie) {
+                this.posterUrl = posterUrl
+            }
+        }
+    }
+}
