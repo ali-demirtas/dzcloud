@@ -30,8 +30,9 @@ jobs:
         run: |
           gradle makePlugins -Pandroid.useAndroidX=true -Pandroid.enableJetifier=true
           mkdir -p deploy
-          cp -r build/*.cs3 deploy/ 2>/dev/null || cp -r DizipalProvider/build/*.cs3 deploy/ 2>/dev/null || true
-          cp -r build/*.json deploy/ 2>/dev/null || cp -r DizipalProvider/build/*.json deploy/ 2>/dev/null || true
+          touch deploy/.nojekyll
+          find . -name "*.cs3" -exec cp {} deploy/ \;
+          find . -name "plugins.json" -exec cp {} deploy/ \;
 
       - name: Deploy to Builds Branch
         uses: JamesIves/github-pages-deploy-action@v4
