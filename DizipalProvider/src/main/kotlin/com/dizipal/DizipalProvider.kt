@@ -124,7 +124,25 @@ class DizipalProvider : MainAPI() {
                     }
                 )
             } else {
-                loadExtractor(iframeUrl, subtitleCallback, callback)
+                val embedHtml = runCatching { app.get(iframeUrl, referer = mainUrl).text }.getOrNull()
+                val m3u8 = embedHtml?.let {
+                    Regex("(?:M3U8|file)\\s*[:=]\\s*[\\\"']([^\\\"']+\\.m3u8[^\\\"']*)", RegexOption.IGNORE_CASE)
+                        .find(it)?.groupValues?.get(1)
+                }
+                if (m3u8 != null) {
+                    callback.invoke(
+                        newExtractorLink(name, "Dizipal", m3u8, ExtractorLinkType.M3U8) {
+                            this.referer = iframeUrl
+                        }
+                    )
+                    Regex("\\[([^]]+)](https?://[^\\\"']+\\.(?:vtt|srt))", RegexOption.IGNORE_CASE)
+                        .findAll(embedHtml)
+                        .forEach { match ->
+                            subtitleCallback(SubtitleFile(match.groupValues[1], match.groupValues[2]))
+                        }
+                } else {
+                    loadExtractor(iframeUrl, subtitleCallback, callback)
+                }
             }
         }
 
