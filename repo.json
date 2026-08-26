@@ -1,0 +1,8 @@
+{
+  "name": "DZCloud Deposu",
+  "description": "Özel Cloudstream Eklenti Deposu",
+  "manifestVersion": 1,
+  "pluginLists": [
+    "https://ali-demirtas.github.io/dzcloud/plugins.json"
+  ]
+}
