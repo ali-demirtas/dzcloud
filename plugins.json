@@ -1,10 +1,10 @@
 [
     {
         "iconUrl": "https://dizipal2302.com/uploads/site/favicon-192x192.png",
-        "fileHash": "sha256-e6350f1d8849b56592477de519b16d837ad53e6ccb54947d2afd3f3d24b130ca",
+        "fileHash": "sha256-a61cfe6df7fded4cff5d2b364d1e5d989bd7f5fcbfcca325d468c4963ac5731e",
         "apiVersion": 1,
         "repositoryUrl": "https://github.com/ali-demirtas/dzcloud",
-        "fileSize": 17786,
+        "fileSize": 22680,
         "status": 1,
         "language": "tr",
         "authors": [
@@ -14,7 +14,7 @@
             "Movie",
             "TvSeries"
         ],
-        "version": 4,
+        "version": 5,
         "internalName": "DizipalProvider",
         "description": "Dizipal film ve dizi sa\u011flay\u0131c\u0131s\u0131",
         "url": "https://raw.githubusercontent.com/ali-demirtas/dzcloud/builds/DizipalProvider.cs3",
