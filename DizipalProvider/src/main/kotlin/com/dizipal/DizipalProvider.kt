@@ -141,9 +141,8 @@ class DizipalProvider : MainAPI() {
                     val subtitleConfig = Regex("subtitle\\s*[:=]\\s*[\\\"']([^\\\"']+)", RegexOption.IGNORE_CASE)
                         .find(embedHtml)?.groupValues?.get(1)
                         ?.replace("\\\\/", "/")
-                    subtitleConfig
-                        ?.split(Regex(",(?=\\[)"))
-                        ?.forEach { track ->
+                    subtitleConfig?.split(Regex(",(?=\\[)"))?.let { tracks ->
+                        for (track in tracks) {
                             val separator = track.indexOf(']')
                             if (track.startsWith("[") && separator > 1) {
                                 val label = track.substring(1, separator)
@@ -151,10 +150,18 @@ class DizipalProvider : MainAPI() {
                                     .replace("\\\\/", "/")
                                     .replace("\\u0026", "&")
                                 if (subtitleUrl.startsWith("http")) {
-                                    subtitleCallback(SubtitleFile(label, subtitleUrl))
+                                    subtitleCallback(
+                                        newSubtitleFile(label, subtitleUrl) {
+                                            headers = mapOf(
+                                                "Referer" to iframeUrl,
+                                                "User-Agent" to USER_AGENT
+                                            )
+                                        }
+                                    )
                                 }
                             }
                         }
+                    }
                 } else {
                     loadExtractor(iframeUrl, subtitleCallback, callback)
                 }
