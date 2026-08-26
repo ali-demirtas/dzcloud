@@ -258,7 +258,7 @@ class DizipalProvider : MainAPI() {
             ?.replace("\\u0026", "&")
     }
 
-    private fun emitSubtitle(
+    private suspend fun emitSubtitle(
         html: String,
         referer: String,
         subtitleCallback: (SubtitleFile) -> Unit
