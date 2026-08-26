@@ -1,11 +1,9 @@
 package com.dizipal
 
 import com.lagradost.cloudstream3.*
-import com.lagradost.cloudstream3.plugins.CloudstreamPlugin
 import com.lagradost.cloudstream3.utils.*
 import org.jsoup.nodes.Element
 
-@CloudstreamPlugin
 class DizipalProvider : MainAPI() {
     override var mainUrl = "https://dizipal2301.com"
     override var name = "Dizipal"
