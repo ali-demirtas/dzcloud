@@ -179,6 +179,23 @@ class DizipalProvider : MainAPI() {
                 continue
             }
 
+            // Let Cloudstream's host extractor run first. Besides the video link it
+            // also parses host-specific subtitle tracks (for example ShowingCircle).
+            var extractorProducedLink = false
+            loadExtractor(
+                embedUrl,
+                data,
+                subtitleCallback,
+                callback = { link ->
+                    extractorProducedLink = true
+                    callback(link)
+                }
+            )
+            if (extractorProducedLink) {
+                emittedLink = true
+                continue
+            }
+
             val embedHtml = runCatching {
                 app.get(embedUrl, referer = data).text
             }.getOrNull()
@@ -191,8 +208,6 @@ class DizipalProvider : MainAPI() {
                     }
                 )
                 emitSubtitle(embedHtml, embedUrl, subtitleCallback)
-                emittedLink = true
-            } else if (loadExtractor(embedUrl, data, subtitleCallback, callback)) {
                 emittedLink = true
             }
         }
@@ -239,10 +254,33 @@ class DizipalProvider : MainAPI() {
             ?: playerJson.optString("securedLink").takeIf { it.isNotBlank() }
             ?: return false
 
+        val streamHeaders = mutableMapOf(
+            "Origin" to origin,
+            "User-Agent" to USER_AGENT
+        )
+        embedResponse.cookies.takeIf { it.isNotEmpty() }?.let { cookies ->
+            streamHeaders["Cookie"] = cookies.entries.joinToString("; ") {
+                "${it.key}=${it.value}"
+            }
+        }
+
+        // Verify that FirePlayer returned HLS rather than an HTML/WAF error page.
+        // The same session headers must also be passed to Media3 below.
+        val masterText = runCatching {
+            app.get(
+                hlsUrl,
+                referer = embedUrl,
+                cookies = embedResponse.cookies,
+                headers = streamHeaders,
+                cacheTime = 0
+            ).text
+        }.getOrNull() ?: return false
+        if (!masterText.trimStart().startsWith("#EXTM3U")) return false
+
         callback(
             newExtractorLink(name, "Dizipal", hlsUrl, ExtractorLinkType.M3U8) {
                 this.referer = embedUrl
-                this.headers = mapOf("User-Agent" to USER_AGENT)
+                this.headers = streamHeaders
             }
         )
         return true
