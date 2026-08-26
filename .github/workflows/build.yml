@@ -33,6 +33,7 @@ jobs:
           touch deploy/.nojekyll
           find . -name "*.cs3" -exec cp {} deploy/ \;
           find . -name "plugins.json" -exec cp {} deploy/ \;
+          cp repo.json deploy/repo.json
 
       - name: Deploy to Builds Branch
         uses: JamesIves/github-pages-deploy-action@v4
