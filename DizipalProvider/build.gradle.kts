@@ -9,6 +9,11 @@ version = 1
 cloudstream {
     setRepo("https://github.com/ali-demirtas/dzcloud")
     authors = listOf("ali-demirtas")
+    description = "Dizipal film ve dizi sağlayıcısı"
+    status = 1
+    language = "tr"
+    tvTypes = listOf("Movie", "TvSeries")
+    iconUrl = "https://dizipal2302.com/uploads/site/favicon-192x192.png"
 }
 
 android {
