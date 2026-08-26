@@ -135,10 +135,20 @@ class DizipalProvider : MainAPI() {
                             this.referer = iframeUrl
                         }
                     )
-                    Regex("\\[([^]]+)](https?://[^\\\"']+\\.(?:vtt|srt))", RegexOption.IGNORE_CASE)
-                        .findAll(embedHtml)
-                        .forEach { match ->
-                            subtitleCallback(SubtitleFile(match.groupValues[1], match.groupValues[2]))
+                    val subtitleConfig = Regex("subtitle\\s*[:=]\\s*[\\\"']([^\\\"']+)", RegexOption.IGNORE_CASE)
+                        .find(embedHtml)?.groupValues?.get(1)
+                        ?.replace("\\\\/", "/")
+                    subtitleConfig
+                        ?.split(Regex(",(?=\\[)"))
+                        ?.forEach { track ->
+                            val separator = track.indexOf(']')
+                            if (track.startsWith("[") && separator > 1) {
+                                val label = track.substring(1, separator)
+                                val subtitleUrl = track.substring(separator + 1).trim()
+                                if (subtitleUrl.startsWith("http")) {
+                                    subtitleCallback(SubtitleFile(label, subtitleUrl))
+                                }
+                            }
                         }
                 } else {
                     loadExtractor(iframeUrl, subtitleCallback, callback)
