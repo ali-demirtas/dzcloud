@@ -16,22 +16,13 @@ class DizipalProvider : MainAPI() {
     // 1. ANA SAYFA
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
         val document = app.get(mainUrl).document
-        val homeLists = mutableListOf<HomePageList>()
-
-        val sections = document.select("h2").mapNotNull { it.parent() }
-        if (sections.isNotEmpty()) {
-            for (section: Element in sections) {
-                val title = section.selectFirst("h2, h3, .section-title")?.text()?.trim() ?: "İçerikler"
-                val items = section.select("a[href*='/film/'], a[href*='/dizi/']").mapNotNull { it.toSearchResult() }
-                if (items.isNotEmpty()) {
-                    homeLists.add(HomePageList(title, items))
-                }
-            }
+        val items = document.select("a[href*='/film/'], a[href*='/dizi/']")
+            .distinctBy { it.attr("href") }
+            .mapNotNull { it.toSearchResult() }
+        val homeLists = if (items.isEmpty()) {
+            emptyList()
         } else {
-            val items = document.select("a[href*='/film/'], a[href*='/dizi/']").mapNotNull { it.toSearchResult() }
-            if (items.isNotEmpty()) {
-                homeLists.add(HomePageList("Öne Çıkanlar", items))
-            }
+            listOf(HomePageList("Öne Çıkanlar", items))
         }
 
         return newHomePageResponse(homeLists)
