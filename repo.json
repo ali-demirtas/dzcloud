@@ -1,8 +1,0 @@
-{
-  "name": "DZCloud",
-  "description": "Özel Cloudstream Eklentileri",
-  "manifestVersion": 1,
-  "pluginLists": [
-    "https://ali-demirtas.github.io/dzcloud/plugins.json"
-  ]
-}
