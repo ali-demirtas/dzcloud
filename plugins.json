@@ -1,10 +1,10 @@
 [
     {
         "iconUrl": "https://dizipal2302.com/uploads/site/favicon-192x192.png",
-        "fileHash": "sha256-7bab53573d9d3afdd5e20f4a4a2e241ec39cddd1cda2e0e251f3a4b07b162aef",
+        "fileHash": "sha256-c29f73de9b0add4064bb51fcbd371cf1557051a306c35f2e9d78eed3fa2932f1",
         "apiVersion": 1,
         "repositoryUrl": "https://github.com/ali-demirtas/dzcloud",
-        "fileSize": 14424,
+        "fileSize": 14524,
         "status": 1,
         "language": "tr",
         "authors": [
