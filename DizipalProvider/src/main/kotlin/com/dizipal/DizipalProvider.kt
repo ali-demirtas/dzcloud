@@ -41,12 +41,52 @@ class DizipalProvider : MainAPI() {
     // 3. DETAY VE BÖLÜM LİSTESİ
     override suspend fun load(url: String): LoadResponse {
         val document = app.get(url).document
+        val ldCombined = document.select("script[type=application/ld+json]")
+            .joinToString("\n") { it.data() }
 
         val title = document.selectFirst("h1, .entry-title, .title")?.text()?.trim() ?: "Bilinmeyen Başlık"
         val poster = fixUrlNull(document.selectFirst("meta[property=og:image]")?.attr("content") ?: document.selectFirst("img")?.attr("src"))
-        val description = document.selectFirst("meta[property=og:description], meta[name=description]")?.attr("content")?.trim()
-        val jsonLd = document.selectFirst("script[type=application/ld+json]")?.data().orEmpty()
-        val year = Regex("\\b(19|20)\\d{2}\\b").find(jsonLd)?.value?.toIntOrNull()
+        val descriptionFromLd = Regex("\"description\"\\s*:\\s*\"((?:\\\\.|[^\"\\\\])+)\"")
+            .findAll(ldCombined)
+            .map { match ->
+                match.groupValues[1]
+                    .replace("\\\\/", "/")
+                    .replace("\\u0027", "'")
+                    .replace("\\u0026", "&")
+                    .trim()
+            }
+            .firstOrNull { it.length > 40 }
+        val description = descriptionFromLd
+            ?: document.selectFirst("p.xf19fb0, .xf19fb0, .description p, .overview p")?.text()?.trim()
+            ?: document.selectFirst("meta[property=og:description], meta[name=description]")?.attr("content")?.trim()
+
+        val year = Regex("\"datePublished\"\\s*:\\s*\"?((?:19|20)\\d{2})\"?")
+            .find(ldCombined)?.groupValues?.get(1)?.toIntOrNull()
+
+        val imdbScore = Regex("\"ratingValue\"\\s*:\\s*\"?([0-9]+(?:\\.[0-9]+)?)\"?")
+            .find(ldCombined)?.groupValues?.get(1)?.toDoubleOrNull()
+            ?: Regex("([0-9]+(?:\\.[0-9]+)?)\\s*IMDB", RegexOption.IGNORE_CASE)
+                .find(document.text())?.groupValues?.get(1)?.toDoubleOrNull()
+
+        val durationMinutes = Regex("\"duration\"\\s*:\\s*\"PT(\\d+)M\"", RegexOption.IGNORE_CASE)
+            .find(ldCombined)?.groupValues?.get(1)?.toIntOrNull()
+            ?: Regex("(\\d+)\\s*dk", RegexOption.IGNORE_CASE)
+                .find(document.text())?.groupValues?.get(1)?.toIntOrNull()
+
+        val trailerUrl = document.select("a[href]")
+            .firstOrNull {
+                val href = it.attr("href")
+                val text = it.text()
+                text.contains("Fragman", ignoreCase = true) ||
+                    href.contains("youtube.com", ignoreCase = true) ||
+                    href.contains("youtu.be", ignoreCase = true)
+            }
+            ?.attr("href")
+            ?.let { rawUrl ->
+                rawUrl
+                    .replace("https://www.youtube.com/embed/", "https://www.youtube.com/watch?v=")
+                    .replace("https://youtube.com/embed/", "https://www.youtube.com/watch?v=")
+            }
 
         val episodeElements = document.select("a[href*='/bolum/']")
         val isSeries = url.contains("/dizi/")
@@ -70,12 +110,25 @@ class DizipalProvider : MainAPI() {
                 this.posterUrl = poster
                 this.plot = description
                 this.year = year
+                this.score = imdbScore?.let { Score.from10(it) }
+                this.duration = durationMinutes
             }
         } else {
             newMovieLoadResponse(title, url, TvType.Movie, url) {
                 this.posterUrl = poster
                 this.plot = description
                 this.year = year
+                this.score = imdbScore?.let { Score.from10(it) }
+                this.duration = durationMinutes
+                trailerUrl?.let {
+                    this.trailers = mutableListOf(
+                        TrailerData(
+                            extractorUrl = it,
+                            referer = url,
+                            raw = false
+                        )
+                    )
+                }
             }
         }
     }
