@@ -130,8 +130,11 @@ class DizipalProvider : MainAPI() {
                         .find(it)?.groupValues?.get(1)
                 }
                 if (m3u8 != null) {
+                    val normalizedM3u8 = m3u8
+                        .replace("\\\\/", "/")
+                        .replace("\\u0026", "&")
                     callback.invoke(
-                        newExtractorLink(name, "Dizipal", m3u8, ExtractorLinkType.M3U8) {
+                        newExtractorLink(name, "Dizipal", normalizedM3u8, ExtractorLinkType.M3U8) {
                             this.referer = iframeUrl
                         }
                     )
@@ -145,6 +148,8 @@ class DizipalProvider : MainAPI() {
                             if (track.startsWith("[") && separator > 1) {
                                 val label = track.substring(1, separator)
                                 val subtitleUrl = track.substring(separator + 1).trim()
+                                    .replace("\\\\/", "/")
+                                    .replace("\\u0026", "&")
                                 if (subtitleUrl.startsWith("http")) {
                                     subtitleCallback(SubtitleFile(label, subtitleUrl))
                                 }
