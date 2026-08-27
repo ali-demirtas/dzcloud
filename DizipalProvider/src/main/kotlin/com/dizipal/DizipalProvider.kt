@@ -37,8 +37,7 @@ class DizipalProvider : MainAPI() {
         }
     }
 
-    // 3. DETAY VE BÖLÜM LİSTESİ
-   // 3. DETAY VE BÖLÜM LİSTESİ (İSİMLENDİRME HATALARI GİDERİLDİ)
+    // 3. DETAY VE BÖLÜM LİSTESİ (İSİMLENDİRME HATALARI GİDERİLDİ)
     override suspend fun load(url: String): LoadResponse {
         val document = app.get(url).document
         val ldCombined = document.select("script[type=application/ld+json]").joinToString("\n") { it.data() }
@@ -113,7 +112,7 @@ class DizipalProvider : MainAPI() {
         }
     }
 
-    // 4. VİDEO KAYNAKLARI (M3U8 REDIRECT RESOLVER EKLENDİ)
+    // 4. VİDEO KAYNAKLARI (M3U8 REDIRECT RESOLVER & SES DÜZELTMESİ EKLENDİ)
     override suspend fun loadLinks(
         data: String,
         isCasting: Boolean,
@@ -158,7 +157,7 @@ class DizipalProvider : MainAPI() {
             if (!cleanIframe.startsWith("http")) continue
 
             // ----------------------------------------------------
-            // IMAGESTOO ÇÖZÜMÜ: YÖNLENDİRME (REDIRECT) ÇÖZÜCÜ
+            // IMAGESTOO ÇÖZÜMÜ: SES + GÖRÜNTÜ BİRLEŞTİRİCİ
             // ----------------------------------------------------
             if (cleanIframe.contains("imagestoo.com")) {
                 val hash = cleanIframe.substringAfter("video/").substringBefore("?").trim()
@@ -198,45 +197,45 @@ class DizipalProvider : MainAPI() {
                             val securedLink = json.optString("securedLink").takeIf { it.isNotBlank() }?.replace("\\/", "/")
                             val targetUrl = securedLink ?: json.optString("videoSource").replace("\\/", "/")
 
-                            // 1. Master M3U8 Dosyasını Bizzat İndiriyoruz
+                            // 1. Ana dosyayı (içinde ses ve görüntü olan listeyi) çekiyoruz
                             val masterM3u8Req = app.get(targetUrl, headers = exoHeaders, cookies = allCookies)
-                            val masterText = masterM3u8Req.text
+                            var masterText = masterM3u8Req.text
 
-                            // 2. M3U8 İçindeki Kaliteleri ve Yönlendirme Linklerini Buluyoruz
-                            val streamRegex = Regex("""#EXT-X-STREAM-INF:.*?RESOLUTION=\d+x(\d+).*?[\r\n]+(https?://[^\s]+)""")
-                            val matches = streamRegex.findAll(masterText).toList()
+                            // 2. M3U8 dosyasının içindeki hem sesi (URI="") hem de videoyu temsil eden tüm linkleri bul
+                            val urlRegex = Regex("""https?://[^\s"']+""")
+                            val urlsInMaster = urlRegex.findAll(masterText).map { it.value }.distinct().toList()
 
-                            if (matches.isNotEmpty()) {
-                                matches.forEach { match ->
-                                    val quality = "${match.groupValues[1]}p"
-                                    val redirectUrl = match.groupValues[2].trim()
+                            var hasRewritten = false
 
-                                    // 3. YÖNLENDİRMEYİ (302) BİZ ÇÖZÜYORUZ (2004 HATASININ BİTTİĞİ YER)
-                                    val finalCdnReq = app.get(redirectUrl, headers = exoHeaders, cookies = allCookies)
-                                    val absoluteCdnUrl = finalCdnReq.url // Doğrudan CDN linkini alıyoruz
-
-                                    callback.invoke(
-                                        newExtractorLink(
-                                            source = name,
-                                            name = "Imagestoo $quality",
-                                            url = absoluteCdnUrl,
-                                            type = ExtractorLinkType.M3U8
-                                        ) {
-                                            this.referer = normalizedIframe
-                                            this.headers = exoHeaders
-                                        }
-                                    )
-                                    foundLinks = true
+                            // 3. Bulunan tüm linklerin yönlendirmelerini (redirect) çöz ve orijinal listeye geri yaz
+                            for (streamUrl in urlsInMaster) {
+                                if (streamUrl.contains("/m3/")) {
+                                    val resolvedReq = app.get(streamUrl, headers = exoHeaders, cookies = allCookies)
+                                    masterText = masterText.replace(streamUrl, resolvedReq.url)
+                                    hasRewritten = true
                                 }
-                            } else {
-                                // Master.txt içinde kalite yoksa direkt ana linki gönder
-                                callback.invoke(
-                                    newExtractorLink(source = name, name = "Imagestoo VIP", url = targetUrl, type = ExtractorLinkType.M3U8) {
-                                        this.referer = normalizedIframe; this.headers = exoHeaders
-                                    }
-                                )
-                                foundLinks = true
                             }
+
+                            // 4. M3U8 dosyasını bellekte Base64'e çevirip Data URI olarak oynatıcıya gönder (SES DAHİL)
+                            val finalPlaybackUrl = if (hasRewritten) {
+                                val b64 = Base64.encodeToString(masterText.toByteArray(Charsets.UTF_8), Base64.NO_WRAP)
+                                "data:application/vnd.apple.mpegurl;base64,$b64"
+                            } else {
+                                if (targetUrl.endsWith(".txt")) "$targetUrl#.m3u8" else targetUrl
+                            }
+
+                            callback.invoke(
+                                newExtractorLink(
+                                    source = name,
+                                    name = "Imagestoo VIP",
+                                    url = finalPlaybackUrl,
+                                    type = ExtractorLinkType.M3U8
+                                ) {
+                                    this.referer = normalizedIframe
+                                    this.headers = exoHeaders
+                                }
+                            )
+                            foundLinks = true
                         }
                     }
                 }
