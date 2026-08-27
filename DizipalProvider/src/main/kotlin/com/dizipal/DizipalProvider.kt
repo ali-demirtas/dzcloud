@@ -135,120 +135,191 @@ class DizipalProvider : MainAPI() {
         }
     }
 
-    // 4. VİDEO KAYNAKLARI
+    // 4. VİDEO KAYNAKLARI (TÜM YAPI KORUNDU + IMAGESTOO EKLENDİ)
     override suspend fun loadLinks(
         data: String,
         isCasting: Boolean,
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        val document = app.get(data).document
-        val iframes = mutableListOf<String>()
+        var foundLinks = false
+        val response = app.get(data)
+        val doc = response.document
+        val rawHtml = response.text
+        
+        val iframeLinks = mutableSetOf<String>()
 
-        // 1. Data-cfg Base64 decode kontrolü
-        document.selectFirst("#videoContainer[data-cfg]")?.attr("data-cfg")?.let { encoded ->
+        // 1. data-cfg içindeki Base64 JSON
+        doc.select("[data-cfg]").forEach { elem ->
             runCatching {
-                val config = JSONObject(String(Base64.decode(encoded, Base64.DEFAULT), Charsets.UTF_8))
-                config.optString("v").takeIf { it.isNotEmpty() }?.let { iframes.add(it) }
+                val cfg = elem.attr("data-cfg")
+                if (cfg.isNotBlank()) {
+                    val decoded = String(Base64.decode(cfg, Base64.DEFAULT), Charsets.UTF_8)
+                    val json = JSONObject(decoded)
+                    json.optString("v").takeIf { it.isNotBlank() }?.let { iframeLinks.add(fixUrl(it)) }
+                    json.optString("file").takeIf { it.isNotBlank() }?.let { iframeLinks.add(fixUrl(it)) }
+                    json.optString("url").takeIf { it.isNotBlank() }?.let { iframeLinks.add(fixUrl(it)) }
+                }
             }
         }
 
-        // 2. Iframe etiketleri
-        document.select("iframe").forEach { iframe: Element ->
-            val src = iframe.attr("src").ifEmpty { iframe.attr("data-src") }
-            if (src.isNotEmpty()) {
-                iframes.add(fixUrl(src))
-            }
+        // 2. Sayfadaki diğer tüm standart iframeler ve embed yapıları
+        doc.select("iframe, [data-frame], [data-video], [data-src], [data-url], .sources-list a, .player-options a").forEach {
+            val src = it.attr("data-frame").ifEmpty { it.attr("data-video") }
+                .ifEmpty { it.attr("data-src") }.ifEmpty { it.attr("data-url") }
+                .ifEmpty { it.attr("href") }.ifEmpty { it.attr("src") }
+            if (src.isNotBlank() && !src.startsWith("#")) iframeLinks.add(fixUrl(src))
         }
 
-        // 3. Alternatif buton ve kaynaklar
-        document.select(".sources-list a, .player-options a, [data-frame]").forEach { btn: Element ->
-            val frameSrc = btn.attr("data-frame").ifEmpty { btn.attr("href") }
-            if (frameSrc.isNotEmpty() && !frameSrc.startsWith("#")) {
-                iframes.add(fixUrl(frameSrc))
-            }
+        // 3. Script / HTML içine gizlenmiş iframe/URL kalıpları (Kaba kuvvet)
+        Regex("""(?i)(?:src|iframe|file|url)\s*[:=]\s*["'](https?://[^"']+)["']""").findAll(rawHtml).forEach {
+            iframeLinks.add(fixUrl(it.groupValues[1]))
         }
 
-        for (iframeUrl in iframes.distinct()) {
-            if (iframeUrl.contains(".m3u8")) {
+        for (iframeUrl in iframeLinks.distinct()) {
+            val cleanIframe = iframeUrl.replace("&amp;", "&").trim()
+            if (!cleanIframe.startsWith("http")) continue
+
+            // A) Imagestoo'ya özel POST/AJAX yaklaşımlı çözüm
+            if (cleanIframe.contains("imagestoo.com/video/")) {
+                val hash = cleanIframe.substringAfterLast("/")
+                if (hash.isNotBlank()) {
+                    val apiUrl = "https://imagestoo.com/player/index.php?data=$hash&do=getVideo"
+                    
+                    val apiResponse = runCatching {
+                        app.post(
+                            url = apiUrl,
+                            headers = mapOf(
+                                "User-Agent" to USER_AGENT,
+                                "Accept" to "*/*",
+                                "X-Requested-With" to "XMLHttpRequest",
+                                "Origin" to "https://imagestoo.com",
+                                "Referer" to cleanIframe,
+                                "Content-Type" to "application/x-www-form-urlencoded; charset=UTF-8"
+                            ),
+                            data = mapOf(
+                                "hash" to hash,
+                                "r" to mainUrl
+                            )
+                        ).text
+                    }.getOrNull()
+
+                    if (apiResponse != null) {
+                        val videoRegex = Regex("""(?i)(https?:\/\/[^\s"'<>]+\.(?:m3u8|mp4)[^\s"'<>]*)""")
+                        videoRegex.findAll(apiResponse.replace("\\/", "/")).forEach { match ->
+                            val finalUrl = match.groupValues[1]
+                            val isM3u8 = finalUrl.contains(".m3u8")
+                            callback.invoke(
+                                newExtractorLink(
+                                    source = name,
+                                    name = "Imagestoo Server",
+                                    url = finalUrl,
+                                    type = if (isM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
+                                ) {
+                                    this.referer = cleanIframe
+                                    this.headers = mapOf(
+                                        "Origin" to "https://imagestoo.com",
+                                        "Referer" to cleanIframe,
+                                        "User-Agent" to USER_AGENT
+                                    )
+                                }
+                            )
+                            foundLinks = true
+                        }
+                    }
+                }
+                continue // Imagestoo işlendi, sonrakine geç
+            }
+
+            // B) Doğrudan verilmiş M3U8 veya MP4 ise yakala
+            if (cleanIframe.contains(".m3u8") || cleanIframe.contains(".mp4")) {
+                val isM3u8 = cleanIframe.contains(".m3u8")
                 callback.invoke(
                     newExtractorLink(
                         source = name,
-                        name = "Dizipal HLS",
-                        url = iframeUrl,
-                        type = ExtractorLinkType.M3U8
+                        name = "Dizipal Kaynak",
+                        url = cleanIframe,
+                        type = if (isM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
                     ) {
                         this.referer = mainUrl
                     }
                 )
+                foundLinks = true
                 continue
             }
 
-            val embedResponse = runCatching {
-                app.get(iframeUrl, referer = mainUrl, headers = mapOf("User-Agent" to USER_AGENT)).text
+            // C) ESKİ SİSTEM KORUMASI: JS Packer, Regex Araması ve Subtitle Çekimi (Diğer sunucular için)
+            val embedRes = runCatching {
+                app.get(
+                    url = cleanIframe, 
+                    referer = data, 
+                    headers = mapOf("User-Agent" to USER_AGENT, "Accept" to "*/*")
+                ).text
             }.getOrNull() ?: continue
 
-            // eval(function(p,a,c,k,e,d)...) JS Packer çözümü (Dahili Unpacker ile)
-            val unpackedHtml = unpackJs(embedResponse) ?: embedResponse
+            val unpacked = unpackJs(embedRes) ?: embedRes
 
-            // Doğrudan veya paket açıldıktan sonra gelen M3U8 bağlantılarını yakalama
-            val m3u8Regex = Regex("""(?:file|source|src)\s*[:=]\s*["'](https?://[^"']+\.m3u8[^"']*)["']""", RegexOption.IGNORE_CASE)
-            val fallbackRegex = Regex("""(https?://[^\s"'<>]+\.m3u8[^\s"'<>]*)""", RegexOption.IGNORE_CASE)
+            val videoRegexes = listOf(
+                Regex("""(?i)file\s*[:=]\s*["'](https?://[^"']+\.(?:m3u8|mp4)[^"']*)["']"""),
+                Regex("""(?i)source\s*[:=]\s*["'](https?://[^"']+\.(?:m3u8|mp4)[^"']*)["']"""),
+                Regex("""(?i)src\s*[:=]\s*["'](https?://[^"']+\.(?:m3u8|mp4)[^"']*)["']"""),
+                Regex("""(https?://[^\s"'<>]+\.(?:m3u8|mp4)[^\s"'<>]*)""")
+            )
 
-            val m3u8Match = m3u8Regex.find(unpackedHtml)?.groupValues?.get(1)
-                ?: fallbackRegex.find(unpackedHtml)?.groupValues?.get(1)
+            var extractedVideo: String? = null
+            for (regex in videoRegexes) {
+                extractedVideo = regex.find(unpacked)?.groupValues?.get(1)
+                if (extractedVideo != null) break
+            }
 
-            if (m3u8Match != null) {
-                val cleanUrl = m3u8Match.replace("\\/", "/").replace("\\u0026", "&")
-                val hostOrigin = getBaseUrl(iframeUrl)
-
+            if (extractedVideo != null) {
+                val finalVideoUrl = extractedVideo.replace("\\/", "/").replace("\\u0026", "&")
+                val isM3u8 = finalVideoUrl.contains(".m3u8")
+                val hostOrigin = getBaseUrl(cleanIframe)
+                
                 callback.invoke(
                     newExtractorLink(
                         source = name,
-                        name = "Dizipal Video",
-                        url = cleanUrl,
-                        type = ExtractorLinkType.M3U8
+                        name = "Dizipal Alternatif",
+                        url = finalVideoUrl,
+                        type = if (isM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
                     ) {
-                        this.referer = iframeUrl
+                        this.referer = cleanIframe
                         this.headers = mapOf(
-                            "Referer" to iframeUrl,
+                            "Referer" to cleanIframe,
                             "User-Agent" to USER_AGENT,
                             "Origin" to hostOrigin
                         )
                     }
                 )
+                foundLinks = true
 
-                // Altyazı tespiti
-                val subtitleConfig = Regex("""subtitle\s*[:=]\s*["']([^"']+)""", RegexOption.IGNORE_CASE)
-                    .find(unpackedHtml)?.groupValues?.get(1)
-                    ?.replace("\\/", "/")
-
-                subtitleConfig?.split(Regex(",(?=\\[)"))?.forEach { track ->
-                    val separator = track.indexOf(']')
-                    if (track.startsWith("[") && separator > 1) {
-                        val label = track.substring(1, separator)
-                        val subUrl = track.substring(separator + 1).trim()
-                            .replace("\\/", "/")
-                            .replace("\\u0026", "&")
-
-                        if (subUrl.startsWith("http")) {
-                            subtitleCallback(
-                                newSubtitleFile(label, subUrl) {
-                                    this.headers = mapOf(
-                                        "Referer" to iframeUrl,
-                                        "User-Agent" to USER_AGENT
-                                    )
-                                }
-                            )
+                // Altyazı çekimi
+                Regex("""(?i)subtitle\s*[:=]\s*["']([^"']+)""").find(unpacked)?.groupValues?.get(1)?.let { subStr ->
+                    subStr.replace("\\/", "/").split(Regex(",(?=\\[)")).forEach { track ->
+                        val sep = track.indexOf(']')
+                        if (track.startsWith("[") && sep > 1) {
+                            val label = track.substring(1, sep)
+                            val subUrl = track.substring(sep + 1).trim()
+                            if (subUrl.startsWith("http")) {
+                                subtitleCallback(
+                                    newSubtitleFile(label, subUrl) {
+                                        this.headers = mapOf("Referer" to cleanIframe)
+                                    }
+                                )
+                            }
                         }
                     }
                 }
             } else {
-                loadExtractor(iframeUrl, subtitleCallback, callback)
+                // Hiçbir şey bulunamazsa yerleşik Extractor'a devret
+                if (loadExtractor(cleanIframe, subtitleCallback, callback)) {
+                    foundLinks = true
+                }
             }
         }
 
-        return iframes.isNotEmpty()
+        return foundLinks
     }
 
     private fun getBaseUrl(url: String): String {
@@ -258,7 +329,7 @@ class DizipalProvider : MainAPI() {
         }.getOrDefault(url)
     }
 
-    // Dean Edwards Packer JS Decoder (Dahili / Bağımsız)
+    // ESKİ YAPIDA KULLANILAN JS DECODER FONKSİYONU
     private fun unpackJs(packed: String): String? {
         val pattern = Regex("""eval\(function\(p,a,c,k,e,d\)\{.*?\}\('(.*?)',(\d+),(\d+),'(.*?)'\.split\('\|'\)""", RegexOption.DOT_MATCHES_ALL)
         val match = pattern.find(packed) ?: return null
