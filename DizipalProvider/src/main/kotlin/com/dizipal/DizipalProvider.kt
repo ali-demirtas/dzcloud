@@ -15,6 +15,9 @@ class DizipalProvider : MainAPI() {
     override var lang = "tr"
     override val hasMainPage = true
 
+    // Sabit kimlik: Imagestoo'nun IP/UA bazlı MD5 şifrelemesini kırmaması için şarttır.
+    private val CHROME_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+
     // 1. ANA SAYFA
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
         val document = app.get(mainUrl).document
@@ -135,7 +138,7 @@ class DizipalProvider : MainAPI() {
         }
     }
 
-    // 4. VİDEO KAYNAKLARI (GÜVENLİ LİNK SEÇİCİ İLE)
+    // 4. VİDEO KAYNAKLARI (2004 HATASINI ÇÖZEN YAPI)
     override suspend fun loadLinks(
         data: String,
         isCasting: Boolean,
@@ -143,13 +146,13 @@ class DizipalProvider : MainAPI() {
         callback: (ExtractorLink) -> Unit
     ): Boolean {
         var foundLinks = false
-        val response = app.get(data)
+        val response = app.get(data, headers = mapOf("User-Agent" to CHROME_UA))
         val doc = response.document
         val rawHtml = response.text
         
         val iframeLinks = mutableSetOf<String>()
 
-        // 1. GLOBAL BASE64 TARAMASI (Sadece http ile başlayanları ekler)
+        // 1. GLOBAL BASE64 TARAMASI (Lohusa gibi filmler için)
         Regex("""eyJ[a-zA-Z0-9_=-]+""").findAll(rawHtml).forEach { match ->
             runCatching {
                 val decoded = String(Base64.decode(match.value, Base64.DEFAULT), Charsets.UTF_8)
@@ -162,7 +165,7 @@ class DizipalProvider : MainAPI() {
             }
         }
 
-        // 2. Sayfadaki iframe, data-cfg ve embed yapıları
+        // 2. data-cfg Taraması (Cem Yılmaz gibi filmler için)
         doc.select("[data-cfg]").forEach { elem ->
             runCatching {
                 val cfg = elem.attr("data-cfg")
@@ -181,7 +184,6 @@ class DizipalProvider : MainAPI() {
             if (src.isNotBlank() && !src.startsWith("#")) iframeLinks.add(fixUrl(src))
         }
 
-        // 3. Normal Script / HTML içine gizlenmiş URL kalıpları
         Regex("""(?i)(?:src|iframe|file|url)\s*[:=]\s*["'](https?://[^"']+)["']""").findAll(rawHtml).forEach {
             iframeLinks.add(fixUrl(it.groupValues[1]))
         }
@@ -191,7 +193,7 @@ class DizipalProvider : MainAPI() {
             if (!cleanIframe.startsWith("http")) continue
 
             // ----------------------------------------------------
-            // YÖNTEM A: IMAGESTOO JSON API & GÜVENLİ LİNK FİLTRESİ
+            // IMAGESTOO ÇÖZÜMÜ (COOKIE MERGE + SABİT UA)
             // ----------------------------------------------------
             if (cleanIframe.contains("imagestoo.com")) {
                 val hash = cleanIframe.substringAfter("video/").substringBefore("?").trim()
@@ -199,59 +201,84 @@ class DizipalProvider : MainAPI() {
                     val normalizedIframe = "https://imagestoo.com/video/$hash"
                     val apiUrl = "https://imagestoo.com/player/index.php?data=$hash&do=getVideo"
                     
+                    val allCookies = mutableMapOf<String, String>()
+
+                    // İlk İstek: Oturum Çerezlerini Al
                     val iframeResp = app.get(
                         url = normalizedIframe,
                         headers = mapOf(
-                            "User-Agent" to USER_AGENT,
-                            "Referer" to "$mainUrl/"
+                            "User-Agent" to CHROME_UA,
+                            "Referer" to "$mainUrl/",
+                            "Accept-Language" to "tr-TR,tr;q=0.9,en-US;q=0.8"
                         )
                     )
-                    val cookieStr = iframeResp.cookies.entries.joinToString("; ") { "${it.key}=${it.value}" }
+                    allCookies.putAll(iframeResp.cookies)
 
-                    val apiResponseText = runCatching {
+                    // İkinci İstek: Çerezleri POST'a yedir ve Videoyu Al
+                    val apiResponse = runCatching {
                         app.post(
                             url = apiUrl,
                             headers = mapOf(
-                                "User-Agent" to USER_AGENT,
+                                "User-Agent" to CHROME_UA,
                                 "Accept" to "*/*",
                                 "X-Requested-With" to "XMLHttpRequest",
                                 "Origin" to "https://imagestoo.com",
                                 "Referer" to normalizedIframe,
-                                "Cookie" to cookieStr,
                                 "Content-Type" to "application/x-www-form-urlencoded; charset=UTF-8"
                             ),
                             data = mapOf(
                                 "hash" to hash,
                                 "r" to "$mainUrl/"
-                            )
-                        ).text
+                            ),
+                            cookies = allCookies
+                        )
                     }.getOrNull()
 
-                    if (apiResponseText != null) {
-                        runCatching {
-                            val securedLink = Regex(""""securedLink"\s*:\s*"([^"]+)"""").find(apiResponseText)?.groupValues?.get(1)?.replace("\\/", "/")
-                            val videoSource = Regex(""""videoSource"\s*:\s*"([^"]+)"""").find(apiResponseText)?.groupValues?.get(1)?.replace("\\/", "/")
-                            
-                            // ÖNCELİK: Sadece yetkili MD5 imzalı linki kullan. Yoksa fallback olarak TXT'yi al.
-                            val targetUrl = if (!securedLink.isNullOrBlank()) securedLink else videoSource
+                    if (apiResponse != null) {
+                        allCookies.putAll(apiResponse.cookies) // Tüm çerezleri birleştir (Oynatıcı için)
+                        val finalCookieStr = allCookies.entries.joinToString("; ") { "${it.key}=${it.value}" }
 
-                            if (!targetUrl.isNullOrBlank()) {
-                                val finalUrl = if (targetUrl.endsWith(".txt")) "$targetUrl#.m3u8" else targetUrl
-                                
+                        runCatching {
+                            val json = JSONObject(apiResponse.text)
+                            val videoSource = json.optString("videoSource").takeIf { it.isNotBlank() }?.replace("\\/", "/")
+                            val securedLink = json.optString("securedLink").takeIf { it.isNotBlank() }?.replace("\\/", "/")
+                            
+                            val exoHeaders = mapOf(
+                                "Origin" to "https://imagestoo.com",
+                                "Referer" to normalizedIframe,
+                                "User-Agent" to CHROME_UA,
+                                "Cookie" to finalCookieStr,
+                                "Accept-Language" to "tr-TR,tr;q=0.9,en-US;q=0.8"
+                            )
+
+                            // 1. Öncelik: Doğrudan master.txt (Orijinal Player'ın kullandığı)
+                            if (videoSource != null) {
+                                val sourceUrl = if (videoSource.endsWith(".txt")) "$videoSource#.m3u8" else videoSource
                                 callback.invoke(
                                     newExtractorLink(
                                         source = name,
-                                        name = "Dizipal VIP",
-                                        url = finalUrl,
+                                        name = "Imagestoo (Master)",
+                                        url = sourceUrl,
                                         type = ExtractorLinkType.M3U8
                                     ) {
                                         this.referer = normalizedIframe
-                                        this.headers = mapOf(
-                                            "Origin" to "https://imagestoo.com",
-                                            "Referer" to normalizedIframe,
-                                            "User-Agent" to USER_AGENT,
-                                            "Cookie" to cookieStr
-                                        )
+                                        this.headers = exoHeaders
+                                    }
+                                )
+                                foundLinks = true
+                            }
+
+                            // 2. Öncelik: Secured Link (MD5 Şifreli)
+                            if (securedLink != null) {
+                                callback.invoke(
+                                    newExtractorLink(
+                                        source = name,
+                                        name = "Imagestoo (Secured)",
+                                        url = securedLink,
+                                        type = ExtractorLinkType.M3U8
+                                    ) {
+                                        this.referer = normalizedIframe
+                                        this.headers = exoHeaders
                                     }
                                 )
                                 foundLinks = true
@@ -263,7 +290,7 @@ class DizipalProvider : MainAPI() {
             }
 
             // ----------------------------------------------------
-            // YÖNTEM B: DİĞER STANDART M3U8 VE MP4'LER
+            // DİĞER STANDART LİNKLER & ALTERNATİF SUNUCULAR
             // ----------------------------------------------------
             if (cleanIframe.contains(".m3u8") || cleanIframe.contains(".mp4")) {
                 val isM3u8 = cleanIframe.contains(".m3u8")
@@ -281,14 +308,11 @@ class DizipalProvider : MainAPI() {
                 continue
             }
 
-            // ----------------------------------------------------
-            // YÖNTEM C: ALTERNATİF SUNUCULAR (JS Unpacker & Regex)
-            // ----------------------------------------------------
             val embedResReq = runCatching {
                 app.get(
                     url = cleanIframe, 
                     headers = mapOf(
-                        "User-Agent" to USER_AGENT, 
+                        "User-Agent" to CHROME_UA, 
                         "Accept" to "*/*",
                         "Referer" to "$mainUrl/"
                     )
@@ -327,7 +351,7 @@ class DizipalProvider : MainAPI() {
                         this.referer = cleanIframe
                         this.headers = mapOf(
                             "Referer" to cleanIframe,
-                            "User-Agent" to USER_AGENT,
+                            "User-Agent" to CHROME_UA,
                             "Origin" to hostOrigin,
                             "Cookie" to genericCookieStr
                         )

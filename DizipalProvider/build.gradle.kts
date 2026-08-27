@@ -4,7 +4,7 @@ plugins {
     id("com.lagradost.cloudstream3.gradle")
 }
 
-version = 13
+version = 14
 
 cloudstream {
     setRepo("https://github.com/ali-demirtas/dzcloud")
