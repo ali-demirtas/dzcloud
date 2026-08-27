@@ -135,7 +135,7 @@ class DizipalProvider : MainAPI() {
         }
     }
 
-    // 4. VİDEO KAYNAKLARI (GLOBAL BASE64 & ExoPlayer TXT FİX)
+    // 4. VİDEO KAYNAKLARI (GÜVENLİ LİNK SEÇİCİ İLE)
     override suspend fun loadLinks(
         data: String,
         isCasting: Boolean,
@@ -149,16 +149,15 @@ class DizipalProvider : MainAPI() {
         
         val iframeLinks = mutableSetOf<String>()
 
-        // 1. GLOBAL BASE64 TARAMASI (Lohusa gibi gizli linkler için)
-        // 'eyJ' ile başlayan her şey potansiyel bir JSON Base64 string'idir
+        // 1. GLOBAL BASE64 TARAMASI (Sadece http ile başlayanları ekler)
         Regex("""eyJ[a-zA-Z0-9_=-]+""").findAll(rawHtml).forEach { match ->
             runCatching {
                 val decoded = String(Base64.decode(match.value, Base64.DEFAULT), Charsets.UTF_8)
                 if (decoded.contains("imagestoo.com") || decoded.contains("file") || decoded.contains("v\"")) {
                     val json = JSONObject(decoded)
-                    json.optString("v").takeIf { it.isNotBlank() }?.let { iframeLinks.add(fixUrl(it)) }
-                    json.optString("file").takeIf { it.isNotBlank() }?.let { iframeLinks.add(fixUrl(it)) }
-                    json.optString("url").takeIf { it.isNotBlank() }?.let { iframeLinks.add(fixUrl(it)) }
+                    json.optString("v").takeIf { it.startsWith("http") }?.let { iframeLinks.add(it) }
+                    json.optString("file").takeIf { it.startsWith("http") }?.let { iframeLinks.add(it) }
+                    json.optString("url").takeIf { it.startsWith("http") }?.let { iframeLinks.add(it) }
                 }
             }
         }
@@ -170,7 +169,7 @@ class DizipalProvider : MainAPI() {
                 if (cfg.isNotBlank()) {
                     val decoded = String(Base64.decode(cfg, Base64.DEFAULT), Charsets.UTF_8)
                     val json = JSONObject(decoded)
-                    json.optString("v").takeIf { it.isNotBlank() }?.let { iframeLinks.add(fixUrl(it)) }
+                    json.optString("v").takeIf { it.startsWith("http") }?.let { iframeLinks.add(it) }
                 }
             }
         }
@@ -192,11 +191,11 @@ class DizipalProvider : MainAPI() {
             if (!cleanIframe.startsWith("http")) continue
 
             // ----------------------------------------------------
-            // YÖNTEM A: IMAGESTOO JSON API & TXT->M3U8 ÇEVRİMİ
+            // YÖNTEM A: IMAGESTOO JSON API & GÜVENLİ LİNK FİLTRESİ
             // ----------------------------------------------------
             if (cleanIframe.contains("imagestoo.com")) {
-                val hash = cleanIframe.split("/").lastOrNull { it.isNotBlank() }
-                if (!hash.isNullOrBlank()) {
+                val hash = cleanIframe.substringAfter("video/").substringBefore("?").trim()
+                if (hash.isNotBlank()) {
                     val normalizedIframe = "https://imagestoo.com/video/$hash"
                     val apiUrl = "https://imagestoo.com/player/index.php?data=$hash&do=getVideo"
                     
@@ -230,25 +229,19 @@ class DizipalProvider : MainAPI() {
 
                     if (apiResponseText != null) {
                         runCatching {
-                            val json = JSONObject(apiResponseText)
-                            val securedLink = json.optString("securedLink")
-                            val videoSource = json.optString("videoSource") // Genellikle master.txt
+                            val securedLink = Regex(""""securedLink"\s*:\s*"([^"]+)"""").find(apiResponseText)?.groupValues?.get(1)?.replace("\\/", "/")
+                            val videoSource = Regex(""""videoSource"\s*:\s*"([^"]+)"""").find(apiResponseText)?.groupValues?.get(1)?.replace("\\/", "/")
                             
-                            // İkisini de listeye al, hem Auto hem VIP sunucu olarak Cloudstream'e ver
-                            val sources = listOf(videoSource, securedLink)
-                                .filter { it.isNotBlank() }
-                                .map { it.replace("\\/", "/") }
-                                .distinct()
+                            // ÖNCELİK: Sadece yetkili MD5 imzalı linki kullan. Yoksa fallback olarak TXT'yi al.
+                            val targetUrl = if (!securedLink.isNullOrBlank()) securedLink else videoSource
 
-                            sources.forEach { targetUrl ->
-                                // ExoPlayer .txt dosyasını algılasın diye sonuna zorunlu #.m3u8 ekliyoruz
+                            if (!targetUrl.isNullOrBlank()) {
                                 val finalUrl = if (targetUrl.endsWith(".txt")) "$targetUrl#.m3u8" else targetUrl
-                                val serverName = if (targetUrl.contains("master.txt")) "Imagestoo (Auto)" else "Imagestoo (Secured)"
-
+                                
                                 callback.invoke(
                                     newExtractorLink(
                                         source = name,
-                                        name = serverName,
+                                        name = "Dizipal VIP",
                                         url = finalUrl,
                                         type = ExtractorLinkType.M3U8
                                     ) {
