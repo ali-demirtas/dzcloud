@@ -135,7 +135,7 @@ class DizipalProvider : MainAPI() {
         }
     }
 
-    // 4. VİDEO KAYNAKLARI (TÜM YAPI KORUNDU + IMAGESTOO EKLENDİ)
+    // 4. VİDEO KAYNAKLARI (ÇEREZ AKTARIMI VE HATA 2004 ÇÖZÜMÜ İLE)
     override suspend fun loadLinks(
         data: String,
         isCasting: Boolean,
@@ -163,7 +163,7 @@ class DizipalProvider : MainAPI() {
             }
         }
 
-        // 2. Sayfadaki diğer tüm standart iframeler ve embed yapıları
+        // 2. Sayfadaki diğer iframe ve embed yapıları
         doc.select("iframe, [data-frame], [data-video], [data-src], [data-url], .sources-list a, .player-options a").forEach {
             val src = it.attr("data-frame").ifEmpty { it.attr("data-video") }
                 .ifEmpty { it.attr("data-src") }.ifEmpty { it.attr("data-url") }
@@ -171,7 +171,7 @@ class DizipalProvider : MainAPI() {
             if (src.isNotBlank() && !src.startsWith("#")) iframeLinks.add(fixUrl(src))
         }
 
-        // 3. Script / HTML içine gizlenmiş iframe/URL kalıpları (Kaba kuvvet)
+        // 3. Script / HTML içine gizlenmiş URL kalıpları
         Regex("""(?i)(?:src|iframe|file|url)\s*[:=]\s*["'](https?://[^"']+)["']""").findAll(rawHtml).forEach {
             iframeLinks.add(fixUrl(it.groupValues[1]))
         }
@@ -180,12 +180,27 @@ class DizipalProvider : MainAPI() {
             val cleanIframe = iframeUrl.replace("&amp;", "&").trim()
             if (!cleanIframe.startsWith("http")) continue
 
-            // A) Imagestoo'ya özel POST/AJAX yaklaşımlı çözüm
-            if (cleanIframe.contains("imagestoo.com/video/")) {
-                val hash = cleanIframe.substringAfterLast("/")
-                if (hash.isNotBlank()) {
+            // ----------------------------------------------------
+            // YÖNTEM A: IMAGESTOO SUNUCULARI İÇİN POST API & ÇEREZ
+            // ----------------------------------------------------
+            if (cleanIframe.contains("imagestoo.com")) {
+                val hash = cleanIframe.split("/").lastOrNull { it.isNotBlank() }
+                if (!hash.isNullOrBlank()) {
+                    val normalizedIframe = "https://imagestoo.com/video/$hash"
                     val apiUrl = "https://imagestoo.com/player/index.php?data=$hash&do=getVideo"
                     
+                    // ADIM 1: Oturum (Session) çerezlerini almak için sayfayı GET ile ziyaret et
+                    val iframeResp = app.get(
+                        url = normalizedIframe,
+                        headers = mapOf(
+                            "User-Agent" to USER_AGENT,
+                            "Referer" to "$mainUrl/"
+                        )
+                    )
+                    // Elde edilen çerezleri formatla (örn. fireplayer_player=...)
+                    val cookieStr = iframeResp.cookies.entries.joinToString("; ") { "${it.key}=${it.value}" }
+
+                    // ADIM 2: Çerezlerle birlikte gerçek videonun POST isteğini yap
                     val apiResponse = runCatching {
                         app.post(
                             url = apiUrl,
@@ -194,21 +209,26 @@ class DizipalProvider : MainAPI() {
                                 "Accept" to "*/*",
                                 "X-Requested-With" to "XMLHttpRequest",
                                 "Origin" to "https://imagestoo.com",
-                                "Referer" to cleanIframe,
-                                "Content-Type" to "application/x-www-form-urlencoded; charset=UTF-8"
+                                "Referer" to normalizedIframe,
+                                "Cookie" to cookieStr
                             ),
                             data = mapOf(
                                 "hash" to hash,
-                                "r" to mainUrl
+                                "r" to "$mainUrl/" // Curl çıktınızdaki r verisi
                             )
                         ).text
                     }.getOrNull()
 
                     if (apiResponse != null) {
+                        // URL Encoding temizliği (\/, \u0026)
+                        val unescapedRes = apiResponse.replace("\\/", "/").replace("\\u0026", "&")
                         val videoRegex = Regex("""(?i)(https?:\/\/[^\s"'<>]+\.(?:m3u8|mp4)[^\s"'<>]*)""")
-                        videoRegex.findAll(apiResponse.replace("\\/", "/")).forEach { match ->
-                            val finalUrl = match.groupValues[1]
+                        
+                        videoRegex.findAll(unescapedRes).forEach { match ->
+                            val finalUrl = match.groupValues[1].trim()
                             val isM3u8 = finalUrl.contains(".m3u8")
+                            
+                            // ADIM 3: ExoPlayer'a oynatması için çerezleri (Cookie) ve başlıkları aktar (2004 HATASINI ÇÖZEN KISIM)
                             callback.invoke(
                                 newExtractorLink(
                                     source = name,
@@ -216,11 +236,12 @@ class DizipalProvider : MainAPI() {
                                     url = finalUrl,
                                     type = if (isM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
                                 ) {
-                                    this.referer = cleanIframe
+                                    this.referer = normalizedIframe
                                     this.headers = mapOf(
                                         "Origin" to "https://imagestoo.com",
-                                        "Referer" to cleanIframe,
-                                        "User-Agent" to USER_AGENT
+                                        "Referer" to normalizedIframe,
+                                        "User-Agent" to USER_AGENT,
+                                        "Cookie" to cookieStr
                                     )
                                 }
                             )
@@ -231,7 +252,9 @@ class DizipalProvider : MainAPI() {
                 continue // Imagestoo işlendi, sonrakine geç
             }
 
-            // B) Doğrudan verilmiş M3U8 veya MP4 ise yakala
+            // ----------------------------------------------------
+            // YÖNTEM B: DOĞRUDAN M3U8 VE MP4 KONTROLÜ
+            // ----------------------------------------------------
             if (cleanIframe.contains(".m3u8") || cleanIframe.contains(".mp4")) {
                 val isM3u8 = cleanIframe.contains(".m3u8")
                 callback.invoke(
@@ -248,15 +271,22 @@ class DizipalProvider : MainAPI() {
                 continue
             }
 
-            // C) ESKİ SİSTEM KORUMASI: JS Packer, Regex Araması ve Subtitle Çekimi (Diğer sunucular için)
-            val embedRes = runCatching {
+            // ----------------------------------------------------
+            // YÖNTEM C: DİĞER SUNUCULAR (JS Unpacker & Regex)
+            // ----------------------------------------------------
+            val embedResReq = runCatching {
                 app.get(
                     url = cleanIframe, 
-                    referer = data, 
-                    headers = mapOf("User-Agent" to USER_AGENT, "Accept" to "*/*")
-                ).text
+                    headers = mapOf(
+                        "User-Agent" to USER_AGENT, 
+                        "Accept" to "*/*",
+                        "Referer" to "$mainUrl/"
+                    )
+                )
             }.getOrNull() ?: continue
 
+            val embedRes = embedResReq.text
+            val genericCookieStr = embedResReq.cookies.entries.joinToString("; ") { "${it.key}=${it.value}" }
             val unpacked = unpackJs(embedRes) ?: embedRes
 
             val videoRegexes = listOf(
@@ -288,7 +318,8 @@ class DizipalProvider : MainAPI() {
                         this.headers = mapOf(
                             "Referer" to cleanIframe,
                             "User-Agent" to USER_AGENT,
-                            "Origin" to hostOrigin
+                            "Origin" to hostOrigin,
+                            "Cookie" to genericCookieStr
                         )
                     }
                 )
@@ -312,7 +343,6 @@ class DizipalProvider : MainAPI() {
                     }
                 }
             } else {
-                // Hiçbir şey bulunamazsa yerleşik Extractor'a devret
                 if (loadExtractor(cleanIframe, subtitleCallback, callback)) {
                     foundLinks = true
                 }
