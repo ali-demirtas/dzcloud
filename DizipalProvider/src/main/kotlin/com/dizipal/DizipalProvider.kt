@@ -3,7 +3,6 @@ package com.dizipal
 import android.util.Base64
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
-import com.lagradost.cloudstream3.utils.Unpacker.unpack
 import org.json.JSONObject
 import org.jsoup.nodes.Element
 import java.net.URI
@@ -98,7 +97,7 @@ class DizipalProvider : MainAPI() {
             val episodes = episodeElements.mapIndexed { index: Int, element: Element ->
                 val epUrl = fixUrl(element.attr("href"))
                 val epName = element.text().trim()
-                
+
                 val seasonNum = Regex("(\\d+)\\.\\s*Sezon", RegexOption.IGNORE_CASE).find(epName)?.groupValues?.get(1)?.toIntOrNull() ?: 1
                 val epNum = Regex("(\\d+)\\.\\s*Bölüm", RegexOption.IGNORE_CASE).find(epName)?.groupValues?.get(1)?.toIntOrNull() ?: (index + 1)
 
@@ -174,10 +173,10 @@ class DizipalProvider : MainAPI() {
             if (iframeUrl.contains(".m3u8")) {
                 callback.invoke(
                     newExtractorLink(
-                        name,
-                        "Dizipal HLS",
-                        iframeUrl,
-                        ExtractorLinkType.M3U8
+                        source = name,
+                        name = "Dizipal HLS",
+                        url = iframeUrl,
+                        type = ExtractorLinkType.M3U8
                     ) {
                         this.referer = mainUrl
                     }
@@ -189,12 +188,8 @@ class DizipalProvider : MainAPI() {
                 app.get(iframeUrl, referer = mainUrl, headers = mapOf("User-Agent" to USER_AGENT)).text
             }.getOrNull() ?: continue
 
-            // eval(function(p,a,c,k,e,d)...) JS Packer çözümü
-            val unpackedHtml = if (embedResponse.contains("eval(function(p,a,c,k,e,")) {
-                unpack(embedResponse) ?: embedResponse
-            } else {
-                embedResponse
-            }
+            // eval(function(p,a,c,k,e,d)...) JS Packer çözümü (Dahili Unpacker ile)
+            val unpackedHtml = unpackJs(embedResponse) ?: embedResponse
 
             // Doğrudan veya paket açıldıktan sonra gelen M3U8 bağlantılarını yakalama
             val m3u8Regex = Regex("""(?:file|source|src)\s*[:=]\s*["'](https?://[^"']+\.m3u8[^"']*)["']""", RegexOption.IGNORE_CASE)
@@ -249,7 +244,6 @@ class DizipalProvider : MainAPI() {
                     }
                 }
             } else {
-                // Diğer bilinen sağlayıcılar için Cloudstream Extractor çağrısı
                 loadExtractor(iframeUrl, subtitleCallback, callback)
             }
         }
@@ -262,6 +256,30 @@ class DizipalProvider : MainAPI() {
             val uri = URI(url)
             "${uri.scheme}://${uri.host}"
         }.getOrDefault(url)
+    }
+
+    // Dean Edwards Packer JS Decoder (Dahili / Bağımsız)
+    private fun unpackJs(packed: String): String? {
+        val pattern = Regex("""eval\(function\(p,a,c,k,e,d\)\{.*?\}\('(.*?)',(\d+),(\d+),'(.*?)'\.split\('\|'\)""", RegexOption.DOT_MATCHES_ALL)
+        val match = pattern.find(packed) ?: return null
+
+        return runCatching {
+            val payload = match.groupValues[1]
+            val radix = match.groupValues[2].toIntOrNull() ?: 36
+            val count = match.groupValues[3].toIntOrNull() ?: 0
+            val dict = match.groupValues[4].split("|")
+
+            val wordMap = mutableMapOf<String, String>()
+            for (i in 0 until count) {
+                val key = i.toString(radix)
+                val value = dict.getOrNull(i).takeIf { !it.isNullOrEmpty() } ?: key
+                wordMap[key] = value
+            }
+
+            Regex("""\b\w+\b""").replace(payload) { m ->
+                wordMap[m.value] ?: m.value
+            }
+        }.getOrNull()
     }
 
     private fun Element.toSearchResult(): SearchResponse? {
