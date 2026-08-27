@@ -135,7 +135,7 @@ class DizipalProvider : MainAPI() {
         }
     }
 
-    // 4. VİDEO KAYNAKLARI 
+    // 4. VİDEO KAYNAKLARI (GLOBAL BASE64 & ExoPlayer TXT FİX)
     override suspend fun loadLinks(
         data: String,
         isCasting: Boolean,
@@ -149,6 +149,21 @@ class DizipalProvider : MainAPI() {
         
         val iframeLinks = mutableSetOf<String>()
 
+        // 1. GLOBAL BASE64 TARAMASI (Lohusa gibi gizli linkler için)
+        // 'eyJ' ile başlayan her şey potansiyel bir JSON Base64 string'idir
+        Regex("""eyJ[a-zA-Z0-9_=-]+""").findAll(rawHtml).forEach { match ->
+            runCatching {
+                val decoded = String(Base64.decode(match.value, Base64.DEFAULT), Charsets.UTF_8)
+                if (decoded.contains("imagestoo.com") || decoded.contains("file") || decoded.contains("v\"")) {
+                    val json = JSONObject(decoded)
+                    json.optString("v").takeIf { it.isNotBlank() }?.let { iframeLinks.add(fixUrl(it)) }
+                    json.optString("file").takeIf { it.isNotBlank() }?.let { iframeLinks.add(fixUrl(it)) }
+                    json.optString("url").takeIf { it.isNotBlank() }?.let { iframeLinks.add(fixUrl(it)) }
+                }
+            }
+        }
+
+        // 2. Sayfadaki iframe, data-cfg ve embed yapıları
         doc.select("[data-cfg]").forEach { elem ->
             runCatching {
                 val cfg = elem.attr("data-cfg")
@@ -156,8 +171,6 @@ class DizipalProvider : MainAPI() {
                     val decoded = String(Base64.decode(cfg, Base64.DEFAULT), Charsets.UTF_8)
                     val json = JSONObject(decoded)
                     json.optString("v").takeIf { it.isNotBlank() }?.let { iframeLinks.add(fixUrl(it)) }
-                    json.optString("file").takeIf { it.isNotBlank() }?.let { iframeLinks.add(fixUrl(it)) }
-                    json.optString("url").takeIf { it.isNotBlank() }?.let { iframeLinks.add(fixUrl(it)) }
                 }
             }
         }
@@ -169,6 +182,7 @@ class DizipalProvider : MainAPI() {
             if (src.isNotBlank() && !src.startsWith("#")) iframeLinks.add(fixUrl(src))
         }
 
+        // 3. Normal Script / HTML içine gizlenmiş URL kalıpları
         Regex("""(?i)(?:src|iframe|file|url)\s*[:=]\s*["'](https?://[^"']+)["']""").findAll(rawHtml).forEach {
             iframeLinks.add(fixUrl(it.groupValues[1]))
         }
@@ -178,7 +192,7 @@ class DizipalProvider : MainAPI() {
             if (!cleanIframe.startsWith("http")) continue
 
             // ----------------------------------------------------
-            // YÖNTEM A: IMAGESTOO JSON API DOĞRUDAN PARSE KONTROLÜ
+            // YÖNTEM A: IMAGESTOO JSON API & TXT->M3U8 ÇEVRİMİ
             // ----------------------------------------------------
             if (cleanIframe.contains("imagestoo.com")) {
                 val hash = cleanIframe.split("/").lastOrNull { it.isNotBlank() }
@@ -217,19 +231,26 @@ class DizipalProvider : MainAPI() {
                     if (apiResponseText != null) {
                         runCatching {
                             val json = JSONObject(apiResponseText)
-                            // API securedLink (ör. .m3u8?md5=) veya doğrudan master.txt döndürür.
                             val securedLink = json.optString("securedLink")
-                            val videoSource = json.optString("videoSource")
+                            val videoSource = json.optString("videoSource") // Genellikle master.txt
                             
-                            val targetUrl = securedLink.ifEmpty { videoSource }.replace("\\/", "/")
+                            // İkisini de listeye al, hem Auto hem VIP sunucu olarak Cloudstream'e ver
+                            val sources = listOf(videoSource, securedLink)
+                                .filter { it.isNotBlank() }
+                                .map { it.replace("\\/", "/") }
+                                .distinct()
 
-                            if (targetUrl.isNotEmpty()) {
+                            sources.forEach { targetUrl ->
+                                // ExoPlayer .txt dosyasını algılasın diye sonuna zorunlu #.m3u8 ekliyoruz
+                                val finalUrl = if (targetUrl.endsWith(".txt")) "$targetUrl#.m3u8" else targetUrl
+                                val serverName = if (targetUrl.contains("master.txt")) "Imagestoo (Auto)" else "Imagestoo (Secured)"
+
                                 callback.invoke(
                                     newExtractorLink(
                                         source = name,
-                                        name = "Imagestoo VIP",
-                                        url = targetUrl,
-                                        type = ExtractorLinkType.M3U8 // Master.txt gelse bile Cloudstream bunu M3U8 okumaya zorlanır
+                                        name = serverName,
+                                        url = finalUrl,
+                                        type = ExtractorLinkType.M3U8
                                     ) {
                                         this.referer = normalizedIframe
                                         this.headers = mapOf(
@@ -249,7 +270,7 @@ class DizipalProvider : MainAPI() {
             }
 
             // ----------------------------------------------------
-            // YÖNTEM B: DOĞRUDAN M3U8 VE MP4 KONTROLÜ
+            // YÖNTEM B: DİĞER STANDART M3U8 VE MP4'LER
             // ----------------------------------------------------
             if (cleanIframe.contains(".m3u8") || cleanIframe.contains(".mp4")) {
                 val isM3u8 = cleanIframe.contains(".m3u8")
@@ -268,7 +289,7 @@ class DizipalProvider : MainAPI() {
             }
 
             // ----------------------------------------------------
-            // YÖNTEM C: DİĞER SUNUCULAR (JS Unpacker & Regex)
+            // YÖNTEM C: ALTERNATİF SUNUCULAR (JS Unpacker & Regex)
             // ----------------------------------------------------
             val embedResReq = runCatching {
                 app.get(
