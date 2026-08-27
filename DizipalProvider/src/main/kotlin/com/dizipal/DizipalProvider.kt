@@ -135,7 +135,7 @@ class DizipalProvider : MainAPI() {
         }
     }
 
-    // 4. VİDEO KAYNAKLARI (ÇEREZ AKTARIMI VE HATA 2004 ÇÖZÜMÜ İLE)
+    // 4. VİDEO KAYNAKLARI 
     override suspend fun loadLinks(
         data: String,
         isCasting: Boolean,
@@ -149,7 +149,6 @@ class DizipalProvider : MainAPI() {
         
         val iframeLinks = mutableSetOf<String>()
 
-        // 1. data-cfg içindeki Base64 JSON
         doc.select("[data-cfg]").forEach { elem ->
             runCatching {
                 val cfg = elem.attr("data-cfg")
@@ -163,7 +162,6 @@ class DizipalProvider : MainAPI() {
             }
         }
 
-        // 2. Sayfadaki diğer iframe ve embed yapıları
         doc.select("iframe, [data-frame], [data-video], [data-src], [data-url], .sources-list a, .player-options a").forEach {
             val src = it.attr("data-frame").ifEmpty { it.attr("data-video") }
                 .ifEmpty { it.attr("data-src") }.ifEmpty { it.attr("data-url") }
@@ -171,7 +169,6 @@ class DizipalProvider : MainAPI() {
             if (src.isNotBlank() && !src.startsWith("#")) iframeLinks.add(fixUrl(src))
         }
 
-        // 3. Script / HTML içine gizlenmiş URL kalıpları
         Regex("""(?i)(?:src|iframe|file|url)\s*[:=]\s*["'](https?://[^"']+)["']""").findAll(rawHtml).forEach {
             iframeLinks.add(fixUrl(it.groupValues[1]))
         }
@@ -181,7 +178,7 @@ class DizipalProvider : MainAPI() {
             if (!cleanIframe.startsWith("http")) continue
 
             // ----------------------------------------------------
-            // YÖNTEM A: IMAGESTOO SUNUCULARI İÇİN POST API & ÇEREZ
+            // YÖNTEM A: IMAGESTOO JSON API DOĞRUDAN PARSE KONTROLÜ
             // ----------------------------------------------------
             if (cleanIframe.contains("imagestoo.com")) {
                 val hash = cleanIframe.split("/").lastOrNull { it.isNotBlank() }
@@ -189,7 +186,6 @@ class DizipalProvider : MainAPI() {
                     val normalizedIframe = "https://imagestoo.com/video/$hash"
                     val apiUrl = "https://imagestoo.com/player/index.php?data=$hash&do=getVideo"
                     
-                    // ADIM 1: Oturum (Session) çerezlerini almak için sayfayı GET ile ziyaret et
                     val iframeResp = app.get(
                         url = normalizedIframe,
                         headers = mapOf(
@@ -197,11 +193,9 @@ class DizipalProvider : MainAPI() {
                             "Referer" to "$mainUrl/"
                         )
                     )
-                    // Elde edilen çerezleri formatla (örn. fireplayer_player=...)
                     val cookieStr = iframeResp.cookies.entries.joinToString("; ") { "${it.key}=${it.value}" }
 
-                    // ADIM 2: Çerezlerle birlikte gerçek videonun POST isteğini yap
-                    val apiResponse = runCatching {
+                    val apiResponseText = runCatching {
                         app.post(
                             url = apiUrl,
                             headers = mapOf(
@@ -210,46 +204,48 @@ class DizipalProvider : MainAPI() {
                                 "X-Requested-With" to "XMLHttpRequest",
                                 "Origin" to "https://imagestoo.com",
                                 "Referer" to normalizedIframe,
-                                "Cookie" to cookieStr
+                                "Cookie" to cookieStr,
+                                "Content-Type" to "application/x-www-form-urlencoded; charset=UTF-8"
                             ),
                             data = mapOf(
                                 "hash" to hash,
-                                "r" to "$mainUrl/" // Curl çıktınızdaki r verisi
+                                "r" to "$mainUrl/"
                             )
                         ).text
                     }.getOrNull()
 
-                    if (apiResponse != null) {
-                        // URL Encoding temizliği (\/, \u0026)
-                        val unescapedRes = apiResponse.replace("\\/", "/").replace("\\u0026", "&")
-                        val videoRegex = Regex("""(?i)(https?:\/\/[^\s"'<>]+\.(?:m3u8|mp4)[^\s"'<>]*)""")
-                        
-                        videoRegex.findAll(unescapedRes).forEach { match ->
-                            val finalUrl = match.groupValues[1].trim()
-                            val isM3u8 = finalUrl.contains(".m3u8")
+                    if (apiResponseText != null) {
+                        runCatching {
+                            val json = JSONObject(apiResponseText)
+                            // API securedLink (ör. .m3u8?md5=) veya doğrudan master.txt döndürür.
+                            val securedLink = json.optString("securedLink")
+                            val videoSource = json.optString("videoSource")
                             
-                            // ADIM 3: ExoPlayer'a oynatması için çerezleri (Cookie) ve başlıkları aktar (2004 HATASINI ÇÖZEN KISIM)
-                            callback.invoke(
-                                newExtractorLink(
-                                    source = name,
-                                    name = "Imagestoo Server",
-                                    url = finalUrl,
-                                    type = if (isM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
-                                ) {
-                                    this.referer = normalizedIframe
-                                    this.headers = mapOf(
-                                        "Origin" to "https://imagestoo.com",
-                                        "Referer" to normalizedIframe,
-                                        "User-Agent" to USER_AGENT,
-                                        "Cookie" to cookieStr
-                                    )
-                                }
-                            )
-                            foundLinks = true
+                            val targetUrl = securedLink.ifEmpty { videoSource }.replace("\\/", "/")
+
+                            if (targetUrl.isNotEmpty()) {
+                                callback.invoke(
+                                    newExtractorLink(
+                                        source = name,
+                                        name = "Imagestoo VIP",
+                                        url = targetUrl,
+                                        type = ExtractorLinkType.M3U8 // Master.txt gelse bile Cloudstream bunu M3U8 okumaya zorlanır
+                                    ) {
+                                        this.referer = normalizedIframe
+                                        this.headers = mapOf(
+                                            "Origin" to "https://imagestoo.com",
+                                            "Referer" to normalizedIframe,
+                                            "User-Agent" to USER_AGENT,
+                                            "Cookie" to cookieStr
+                                        )
+                                    }
+                                )
+                                foundLinks = true
+                            }
                         }
                     }
                 }
-                continue // Imagestoo işlendi, sonrakine geç
+                continue 
             }
 
             // ----------------------------------------------------
@@ -325,7 +321,6 @@ class DizipalProvider : MainAPI() {
                 )
                 foundLinks = true
 
-                // Altyazı çekimi
                 Regex("""(?i)subtitle\s*[:=]\s*["']([^"']+)""").find(unpacked)?.groupValues?.get(1)?.let { subStr ->
                     subStr.replace("\\/", "/").split(Regex(",(?=\\[)")).forEach { track ->
                         val sep = track.indexOf(']')
@@ -359,7 +354,6 @@ class DizipalProvider : MainAPI() {
         }.getOrDefault(url)
     }
 
-    // ESKİ YAPIDA KULLANILAN JS DECODER FONKSİYONU
     private fun unpackJs(packed: String): String? {
         val pattern = Regex("""eval\(function\(p,a,c,k,e,d\)\{.*?\}\('(.*?)',(\d+),(\d+),'(.*?)'\.split\('\|'\)""", RegexOption.DOT_MATCHES_ALL)
         val match = pattern.find(packed) ?: return null
