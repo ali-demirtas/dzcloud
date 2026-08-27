@@ -3,8 +3,11 @@ package com.dizipal
 import android.util.Base64
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
+import com.lagradost.cloudstream3.utils.Unpacker.unpack
 import org.json.JSONObject
 import org.jsoup.nodes.Element
+import java.net.URI
+import java.net.URLEncoder
 
 class DizipalProvider : MainAPI() {
     override var mainUrl = "https://dizipal2302.com"
@@ -30,7 +33,7 @@ class DizipalProvider : MainAPI() {
 
     // 2. ARAMA
     override suspend fun search(query: String): List<SearchResponse> {
-        val searchUrl = "$mainUrl/arama?q=${java.net.URLEncoder.encode(query, "UTF-8")}" 
+        val searchUrl = "$mainUrl/arama?q=${URLEncoder.encode(query, "UTF-8")}"
         val document = app.get(searchUrl).document
 
         return document.select("a[href*='/film/'], a[href*='/dizi/']").distinctBy { it.attr("href") }.mapNotNull {
@@ -143,6 +146,7 @@ class DizipalProvider : MainAPI() {
         val document = app.get(data).document
         val iframes = mutableListOf<String>()
 
+        // 1. Data-cfg Base64 decode kontrolü
         document.selectFirst("#videoContainer[data-cfg]")?.attr("data-cfg")?.let { encoded ->
             runCatching {
                 val config = JSONObject(String(Base64.decode(encoded, Base64.DEFAULT), Charsets.UTF_8))
@@ -150,15 +154,17 @@ class DizipalProvider : MainAPI() {
             }
         }
 
+        // 2. Iframe etiketleri
         document.select("iframe").forEach { iframe: Element ->
-            val src = if (iframe.attr("src").isNotEmpty()) iframe.attr("src") else iframe.attr("data-src")
+            val src = iframe.attr("src").ifEmpty { iframe.attr("data-src") }
             if (src.isNotEmpty()) {
                 iframes.add(fixUrl(src))
             }
         }
 
+        // 3. Alternatif buton ve kaynaklar
         document.select(".sources-list a, .player-options a, [data-frame]").forEach { btn: Element ->
-            val frameSrc = if (btn.attr("data-frame").isNotEmpty()) btn.attr("data-frame") else btn.attr("href")
+            val frameSrc = btn.attr("data-frame").ifEmpty { btn.attr("href") }
             if (frameSrc.isNotEmpty() && !frameSrc.startsWith("#")) {
                 iframes.add(fixUrl(frameSrc))
             }
@@ -176,52 +182,86 @@ class DizipalProvider : MainAPI() {
                         this.referer = mainUrl
                     }
                 )
+                continue
+            }
+
+            val embedResponse = runCatching {
+                app.get(iframeUrl, referer = mainUrl, headers = mapOf("User-Agent" to USER_AGENT)).text
+            }.getOrNull() ?: continue
+
+            // eval(function(p,a,c,k,e,d)...) JS Packer çözümü
+            val unpackedHtml = if (embedResponse.contains("eval(function(p,a,c,k,e,")) {
+                unpack(embedResponse) ?: embedResponse
             } else {
-                val embedHtml = runCatching { app.get(iframeUrl, referer = mainUrl).text }.getOrNull()
-                val m3u8 = embedHtml?.let {
-                    Regex("(?:M3U8|file)\\s*[:=]\\s*[\\\"']([^\\\"']+\\.m3u8[^\\\"']*)", RegexOption.IGNORE_CASE)
-                        .find(it)?.groupValues?.get(1)
-                }
-                if (m3u8 != null) {
-                    val normalizedM3u8 = m3u8
-                        .replace("\\\\/", "/")
-                        .replace("\\u0026", "&")
-                    callback.invoke(
-                        newExtractorLink(name, "Dizipal", normalizedM3u8, ExtractorLinkType.M3U8) {
-                            this.referer = iframeUrl
-                        }
-                    )
-                    val subtitleConfig = Regex("subtitle\\s*[:=]\\s*[\\\"']([^\\\"']+)", RegexOption.IGNORE_CASE)
-                        .find(embedHtml)?.groupValues?.get(1)
-                        ?.replace("\\\\/", "/")
-                    subtitleConfig?.split(Regex(",(?=\\[)"))?.let { tracks ->
-                        for (track in tracks) {
-                            val separator = track.indexOf(']')
-                            if (track.startsWith("[") && separator > 1) {
-                                val label = track.substring(1, separator)
-                                val subtitleUrl = track.substring(separator + 1).trim()
-                                    .replace("\\\\/", "/")
-                                    .replace("\\u0026", "&")
-                                if (subtitleUrl.startsWith("http")) {
-                                    subtitleCallback(
-                                        newSubtitleFile(label, subtitleUrl) {
-                                            headers = mapOf(
-                                                "Referer" to iframeUrl,
-                                                "User-Agent" to USER_AGENT
-                                            )
-                                        }
+                embedResponse
+            }
+
+            // Doğrudan veya paket açıldıktan sonra gelen M3U8 bağlantılarını yakalama
+            val m3u8Regex = Regex("""(?:file|source|src)\s*[:=]\s*["'](https?://[^"']+\.m3u8[^"']*)["']""", RegexOption.IGNORE_CASE)
+            val fallbackRegex = Regex("""(https?://[^\s"'<>]+\.m3u8[^\s"'<>]*)""", RegexOption.IGNORE_CASE)
+
+            val m3u8Match = m3u8Regex.find(unpackedHtml)?.groupValues?.get(1)
+                ?: fallbackRegex.find(unpackedHtml)?.groupValues?.get(1)
+
+            if (m3u8Match != null) {
+                val cleanUrl = m3u8Match.replace("\\/", "/").replace("\\u0026", "&")
+                val hostOrigin = getBaseUrl(iframeUrl)
+
+                callback.invoke(
+                    newExtractorLink(
+                        source = name,
+                        name = "Dizipal Video",
+                        url = cleanUrl,
+                        type = ExtractorLinkType.M3U8
+                    ) {
+                        this.referer = iframeUrl
+                        this.headers = mapOf(
+                            "Referer" to iframeUrl,
+                            "User-Agent" to USER_AGENT,
+                            "Origin" to hostOrigin
+                        )
+                    }
+                )
+
+                // Altyazı tespiti
+                val subtitleConfig = Regex("""subtitle\s*[:=]\s*["']([^"']+)""", RegexOption.IGNORE_CASE)
+                    .find(unpackedHtml)?.groupValues?.get(1)
+                    ?.replace("\\/", "/")
+
+                subtitleConfig?.split(Regex(",(?=\\[)"))?.forEach { track ->
+                    val separator = track.indexOf(']')
+                    if (track.startsWith("[") && separator > 1) {
+                        val label = track.substring(1, separator)
+                        val subUrl = track.substring(separator + 1).trim()
+                            .replace("\\/", "/")
+                            .replace("\\u0026", "&")
+
+                        if (subUrl.startsWith("http")) {
+                            subtitleCallback(
+                                newSubtitleFile(label, subUrl) {
+                                    this.headers = mapOf(
+                                        "Referer" to iframeUrl,
+                                        "User-Agent" to USER_AGENT
                                     )
                                 }
-                            }
+                            )
                         }
                     }
-                } else {
-                    loadExtractor(iframeUrl, subtitleCallback, callback)
                 }
+            } else {
+                // Diğer bilinen sağlayıcılar için Cloudstream Extractor çağrısı
+                loadExtractor(iframeUrl, subtitleCallback, callback)
             }
         }
 
         return iframes.isNotEmpty()
+    }
+
+    private fun getBaseUrl(url: String): String {
+        return runCatching {
+            val uri = URI(url)
+            "${uri.scheme}://${uri.host}"
+        }.getOrDefault(url)
     }
 
     private fun Element.toSearchResult(): SearchResponse? {
