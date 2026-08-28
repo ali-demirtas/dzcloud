@@ -15,9 +15,6 @@ class DizipalProvider : MainAPI() {
     override var lang = "tr"
     override val hasMainPage = true
 
-    // SABİT KİMLİK: MD5 şifrelemesinin bozulmaması için şart
-    private val CHROME_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-
     // 1. ANA SAYFA
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
         val document = app.get(mainUrl).document
@@ -55,8 +52,10 @@ class DizipalProvider : MainAPI() {
             ?: document.selectFirst("meta[property=og:description], meta[name=description]")?.attr("content")?.trim()
 
         val year = Regex("\"datePublished\"\\s*:\\s*\"?((?:19|20)\\d{2})\"?").find(ldCombined)?.groupValues?.get(1)?.toIntOrNull()
+        
         val imdbScore = Regex("\"ratingValue\"\\s*:\\s*\"?([0-9]+(?:\\.[0-9]+)?)\"?").find(ldCombined)?.groupValues?.get(1)?.toDoubleOrNull()
             ?: Regex("([0-9]+(?:\\.[0-9]+)?)\\s*IMDB", RegexOption.IGNORE_CASE).find(document.text())?.groupValues?.get(1)?.toDoubleOrNull()
+            
         val durationMinutes = Regex("\"duration\"\\s*:\\s*\"PT(\\d+)M\"", RegexOption.IGNORE_CASE).find(ldCombined)?.groupValues?.get(1)?.toIntOrNull()
             ?: Regex("(\\d+)\\s*dk", RegexOption.IGNORE_CASE).find(document.text())?.groupValues?.get(1)?.toIntOrNull()
 
@@ -73,25 +72,41 @@ class DizipalProvider : MainAPI() {
                 val rawText = element.text()
 
                 val seasonNum = Regex("-(\\d+)-sezon", RegexOption.IGNORE_CASE).find(epUrl)?.groupValues?.get(1)?.toIntOrNull()
-                    ?: Regex("(\\d+)\\.\\s*Sezon", RegexOption.IGNORE_CASE).find(rawText)?.groupValues?.get(1)?.toIntOrNull() ?: 1
+                    ?: Regex("(\\d+)\\.\\s*Sezon", RegexOption.IGNORE_CASE).find(rawText)?.groupValues?.get(1)?.toIntOrNull() 
+                    ?: 1
                     
                 val epNum = Regex("-(\\d+)-bolum", RegexOption.IGNORE_CASE).find(epUrl)?.groupValues?.get(1)?.toIntOrNull()
-                    ?: Regex("(\\d+)\\.\\s*Bölüm", RegexOption.IGNORE_CASE).find(rawText)?.groupValues?.get(1)?.toIntOrNull() ?: (index + 1)
+                    ?: Regex("(\\d+)\\.\\s*Bölüm", RegexOption.IGNORE_CASE).find(rawText)?.groupValues?.get(1)?.toIntOrNull() 
+                    ?: (index + 1)
 
-                newEpisode(epUrl) { this.season = seasonNum; this.episode = epNum }
+                newEpisode(epUrl) {
+                    this.season = seasonNum
+                    this.episode = epNum
+                }
             }
+
             newTvSeriesLoadResponse(title, url, TvType.TvSeries, episodes) {
-                this.posterUrl = poster; this.plot = description; this.year = year; this.score = imdbScore?.let { Score.from10(it) }; this.duration = durationMinutes
+                this.posterUrl = poster
+                this.plot = description
+                this.year = year
+                this.score = imdbScore?.let { Score.from10(it) }
+                this.duration = durationMinutes
             }
         } else {
             newMovieLoadResponse(title, url, TvType.Movie, url) {
-                this.posterUrl = poster; this.plot = description; this.year = year; this.score = imdbScore?.let { Score.from10(it) }; this.duration = durationMinutes
-                trailerUrl?.let { this.trailers = mutableListOf(TrailerData(it, referer = url, raw = false)) }
+                this.posterUrl = poster
+                this.plot = description
+                this.year = year
+                this.score = imdbScore?.let { Score.from10(it) }
+                this.duration = durationMinutes
+                trailerUrl?.let {
+                    this.trailers = mutableListOf(TrailerData(it, referer = url, raw = false))
+                }
             }
         }
     }
 
-    // 4. VİDEO KAYNAKLARI (M3U8 REDIRECT RESOLVER & SES DÜZELTMESİ)
+    // 4. VİDEO KAYNAKLARI (HATASIZ DOĞRUDAN AKTARIM)
     override suspend fun loadLinks(
         data: String,
         isCasting: Boolean,
@@ -99,11 +114,12 @@ class DizipalProvider : MainAPI() {
         callback: (ExtractorLink) -> Unit
     ): Boolean {
         var foundLinks = false
-        val response = app.get(data, headers = mapOf("User-Agent" to CHROME_UA))
+        // MD5 token uyumsuzluğu yaşamamak için Cloudstream'in yerleşik USER_AGENT'i kullanılıyor
+        val response = app.get(data, headers = mapOf("User-Agent" to USER_AGENT))
         val rawHtml = response.text
         val iframeLinks = mutableSetOf<String>()
 
-        // Base64 Taraması
+        // 1. GLOBAL BASE64 TARAMASI (Lohusa gibi gizlenmiş filmler için)
         Regex("""eyJ[a-zA-Z0-9_=-]+""").findAll(rawHtml).forEach { match ->
             runCatching {
                 val decoded = String(Base64.decode(match.value, Base64.DEFAULT), Charsets.UTF_8)
@@ -116,7 +132,7 @@ class DizipalProvider : MainAPI() {
             }
         }
 
-        // HTML İçi Standart Taramalar
+        // 2. HTML İçi Standart Taramalar (Cem Yılmaz gibi iframeler için)
         response.document.select("[data-cfg]").forEach { elem ->
             runCatching {
                 val cfg = elem.attr("data-cfg")
@@ -138,7 +154,7 @@ class DizipalProvider : MainAPI() {
             if (!cleanIframe.startsWith("http")) continue
 
             // ----------------------------------------------------
-            // IMAGESTOO ÇÖZÜMÜ: SES + GÖRÜNTÜ BİRLEŞTİRİCİ
+            // IMAGESTOO ÇÖZÜMÜ
             // ----------------------------------------------------
             if (cleanIframe.contains("imagestoo.com")) {
                 val hash = cleanIframe.substringAfter("video/").substringBefore("?").trim()
@@ -146,15 +162,18 @@ class DizipalProvider : MainAPI() {
                     val normalizedIframe = "https://imagestoo.com/video/$hash"
                     
                     val allCookies = mutableMapOf<String, String>()
-                    val iframeResp = app.get(normalizedIframe, headers = mapOf("User-Agent" to CHROME_UA, "Referer" to "$mainUrl/"))
+                    val iframeResp = app.get(normalizedIframe, headers = mapOf("User-Agent" to USER_AGENT, "Referer" to "$mainUrl/"))
                     allCookies.putAll(iframeResp.cookies)
 
                     val apiResponse = runCatching {
                         app.post(
                             url = "https://imagestoo.com/player/index.php?data=$hash&do=getVideo",
                             headers = mapOf(
-                                "User-Agent" to CHROME_UA, "Accept" to "*/*", "X-Requested-With" to "XMLHttpRequest",
-                                "Origin" to "https://imagestoo.com", "Referer" to normalizedIframe,
+                                "User-Agent" to USER_AGENT,
+                                "Accept" to "*/*",
+                                "X-Requested-With" to "XMLHttpRequest",
+                                "Origin" to "https://imagestoo.com",
+                                "Referer" to normalizedIframe,
                                 "Content-Type" to "application/x-www-form-urlencoded; charset=UTF-8"
                             ),
                             data = mapOf("hash" to hash, "r" to "$mainUrl/"),
@@ -169,64 +188,35 @@ class DizipalProvider : MainAPI() {
                         val exoHeaders = mapOf(
                             "Origin" to "https://imagestoo.com",
                             "Referer" to normalizedIframe,
-                            "User-Agent" to CHROME_UA,
+                            "User-Agent" to USER_AGENT,
                             "Cookie" to finalCookieStr
                         )
 
                         runCatching {
                             val json = JSONObject(apiResponse.text)
                             val securedLink = json.optString("securedLink").takeIf { it.isNotBlank() }?.replace("\\/", "/")
-                            val targetUrl = securedLink ?: json.optString("videoSource").replace("\\/", "/")
+                            val videoSource = json.optString("videoSource").takeIf { it.isNotBlank() }?.replace("\\/", "/")
+                            
+                            // Güvenli (MD5'li) linki tercih et, yoksa doğrudan txt linkini al.
+                            val targetUrl = securedLink ?: videoSource
 
-                            // 1. Ana dosyayı (içinde ses ve görüntü olan listeyi) çekiyoruz
-                            val masterM3u8Req = app.get(targetUrl, headers = exoHeaders, cookies = allCookies)
-                            var masterText = masterM3u8Req.text
+                            if (targetUrl != null) {
+                                // ExoPlayer uzantıyı tanısın diye txt ise #.m3u8 ekle
+                                val finalPlaybackUrl = if (targetUrl.endsWith(".txt")) "$targetUrl#.m3u8" else targetUrl
 
-                            // 2. M3U8 dosyasının içindeki hem sesi (URI="") hem de videoyu temsil eden tüm imagestoo linklerini bul (/m3/ veya /hls/)
-                            val urlRegex = Regex("""https?://imagestoo\.com/(?:m3|hls)/[^\s"']+""")
-                            val urlsInMaster = urlRegex.findAll(masterText).map { it.value }.distinct().toList()
-
-                            var hasRewritten = false
-
-                            // 3. Bulunan tüm linklerin yönlendirmelerini (redirect) çöz ve orijinal listeye geri yaz
-                            for (streamUrl in urlsInMaster) {
-                                val resolvedReq = app.get(streamUrl, headers = exoHeaders, cookies = allCookies)
-                                // Yönlendirilen CDN adresini master listeye yazdırıyoruz
-                                masterText = masterText.replace(streamUrl, resolvedReq.url)
-                                hasRewritten = true
-                            }
-
-                            // 4. Ayrıca altyazıları (subtitles) yakala ve gönder (URI="https://...")
-                            val subRegex = Regex("""TYPE=SUBTITLES.*?URI="([^"]+)"""")
-                            subRegex.findAll(masterText).forEach { match ->
-                                val subUrl = match.groupValues[1]
-                                subtitleCallback.invoke(
-                                    newSubtitleFile("Türkçe (Orijinal)", subUrl) {
-                                        this.headers = mapOf("Referer" to normalizedIframe, "User-Agent" to CHROME_UA)
+                                callback.invoke(
+                                    newExtractorLink(
+                                        source = name,
+                                        name = "Imagestoo VIP",
+                                        url = finalPlaybackUrl,
+                                        type = ExtractorLinkType.M3U8
+                                    ) {
+                                        this.referer = normalizedIframe
+                                        this.headers = exoHeaders
                                     }
                                 )
+                                foundLinks = true
                             }
-
-                            // 5. M3U8 dosyasını bellekte Base64'e çevirip Data URI olarak oynatıcıya gönder (SES DAHİL)
-                            val finalPlaybackUrl = if (hasRewritten) {
-                                val b64 = Base64.encodeToString(masterText.toByteArray(Charsets.UTF_8), Base64.NO_WRAP)
-                                "data:application/vnd.apple.mpegurl;base64,$b64"
-                            } else {
-                                if (targetUrl.endsWith(".txt")) "$targetUrl#.m3u8" else targetUrl
-                            }
-
-                            callback.invoke(
-                                newExtractorLink(
-                                    source = name,
-                                    name = "Imagestoo VIP",
-                                    url = finalPlaybackUrl,
-                                    type = ExtractorLinkType.M3U8
-                                ) {
-                                    this.referer = normalizedIframe
-                                    this.headers = exoHeaders
-                                }
-                            )
-                            foundLinks = true
                         }
                     }
                 }
@@ -242,7 +232,7 @@ class DizipalProvider : MainAPI() {
                 continue
             }
 
-            val embedResReq = runCatching { app.get(cleanIframe, headers = mapOf("User-Agent" to CHROME_UA, "Referer" to "$mainUrl/")) }.getOrNull() ?: continue
+            val embedResReq = runCatching { app.get(cleanIframe, headers = mapOf("User-Agent" to USER_AGENT, "Referer" to "$mainUrl/")) }.getOrNull() ?: continue
             val unpacked = unpackJs(embedResReq.text) ?: embedResReq.text
             val genericCookieStr = embedResReq.cookies.entries.joinToString("; ") { "${it.key}=${it.value}" }
 
@@ -257,7 +247,13 @@ class DizipalProvider : MainAPI() {
                 val finalVideoUrl = extractedVideo.replace("\\/", "/").replace("\\u0026", "&")
                 callback.invoke(
                     newExtractorLink(source = name, name = "Dizipal Alternatif", url = finalVideoUrl, type = if (finalVideoUrl.contains(".m3u8")) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO) {
-                        this.referer = cleanIframe; this.headers = mapOf("Referer" to cleanIframe, "User-Agent" to CHROME_UA, "Origin" to getBaseUrl(cleanIframe), "Cookie" to genericCookieStr)
+                        this.referer = cleanIframe
+                        this.headers = mapOf(
+                            "Referer" to cleanIframe, 
+                            "User-Agent" to USER_AGENT, 
+                            "Origin" to getBaseUrl(cleanIframe), 
+                            "Cookie" to genericCookieStr
+                        )
                     }
                 )
                 foundLinks = true
