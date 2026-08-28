@@ -34,7 +34,7 @@ class DizipalProvider : MainAPI() {
         }
     }
 
-    // 3. DETAY VE BÖLÜM LİSTESİ (İSİMLENDİRME HATALARI GİDERİLDİ)
+    // 3. DETAY VE BÖLÜM LİSTESİ
     override suspend fun load(url: String): LoadResponse {
         val document = app.get(url).document
         val ldCombined = document.select("script[type=application/ld+json]").joinToString("\n") { it.data() }
@@ -106,7 +106,7 @@ class DizipalProvider : MainAPI() {
         }
     }
 
-    // 4. VİDEO KAYNAKLARI (HATASIZ DOĞRUDAN AKTARIM)
+    // 4. VİDEO KAYNAKLARI (SES KESİNTİSİ VE 2004 HATASI ÇÖZÜLDÜ)
     override suspend fun loadLinks(
         data: String,
         isCasting: Boolean,
@@ -114,12 +114,12 @@ class DizipalProvider : MainAPI() {
         callback: (ExtractorLink) -> Unit
     ): Boolean {
         var foundLinks = false
-        // MD5 token uyumsuzluğu yaşamamak için Cloudstream'in yerleşik USER_AGENT'i kullanılıyor
+        // Bulunduğumuz tarayıcı kimliğini kullanıyoruz ki MD5 şifresi uyumlu kalsın
         val response = app.get(data, headers = mapOf("User-Agent" to USER_AGENT))
         val rawHtml = response.text
         val iframeLinks = mutableSetOf<String>()
 
-        // 1. GLOBAL BASE64 TARAMASI (Lohusa gibi gizlenmiş filmler için)
+        // 1. GLOBAL BASE64 TARAMASI (Lohusa gibi gizli linkler)
         Regex("""eyJ[a-zA-Z0-9_=-]+""").findAll(rawHtml).forEach { match ->
             runCatching {
                 val decoded = String(Base64.decode(match.value, Base64.DEFAULT), Charsets.UTF_8)
@@ -132,7 +132,7 @@ class DizipalProvider : MainAPI() {
             }
         }
 
-        // 2. HTML İçi Standart Taramalar (Cem Yılmaz gibi iframeler için)
+        // 2. HTML İçi Standart Taramalar (Cem Yılmaz gibi açık linkler)
         response.document.select("[data-cfg]").forEach { elem ->
             runCatching {
                 val cfg = elem.attr("data-cfg")
@@ -146,7 +146,6 @@ class DizipalProvider : MainAPI() {
             val src = it.attr("data-frame").ifEmpty { it.attr("data-video") }.ifEmpty { it.attr("data-src") }.ifEmpty { it.attr("src") }
             if (src.isNotBlank() && !src.startsWith("#")) iframeLinks.add(fixUrl(src))
         }
-        
         Regex("""(?i)(?:src|iframe|file|url)\s*[:=]\s*["'](https?://[^"']+)["']""").findAll(rawHtml).forEach { iframeLinks.add(fixUrl(it.groupValues[1])) }
 
         for (iframeUrl in iframeLinks.distinct()) {
@@ -154,7 +153,7 @@ class DizipalProvider : MainAPI() {
             if (!cleanIframe.startsWith("http")) continue
 
             // ----------------------------------------------------
-            // IMAGESTOO ÇÖZÜMÜ
+            // IMAGESTOO ÇÖZÜMÜ (SES KANALINI KORUYAN YÖNTEM)
             // ----------------------------------------------------
             if (cleanIframe.contains("imagestoo.com")) {
                 val hash = cleanIframe.substringAfter("video/").substringBefore("?").trim()
@@ -165,7 +164,7 @@ class DizipalProvider : MainAPI() {
                     val iframeResp = app.get(normalizedIframe, headers = mapOf("User-Agent" to USER_AGENT, "Referer" to "$mainUrl/"))
                     allCookies.putAll(iframeResp.cookies)
 
-                    val apiResponse = runCatching {
+                    val apiResponseText = runCatching {
                         app.post(
                             url = "https://imagestoo.com/player/index.php?data=$hash&do=getVideo",
                             headers = mapOf(
@@ -178,38 +177,49 @@ class DizipalProvider : MainAPI() {
                             ),
                             data = mapOf("hash" to hash, "r" to "$mainUrl/"),
                             cookies = allCookies
-                        )
+                        ).text
                     }.getOrNull()
 
-                    if (apiResponse != null) {
-                        allCookies.putAll(apiResponse.cookies)
-                        val finalCookieStr = allCookies.entries.joinToString("; ") { "${it.key}=${it.value}" }
-                        
-                        val exoHeaders = mapOf(
-                            "Origin" to "https://imagestoo.com",
-                            "Referer" to normalizedIframe,
-                            "User-Agent" to USER_AGENT,
-                            "Cookie" to finalCookieStr
-                        )
-
+                    if (apiResponseText != null) {
                         runCatching {
-                            val json = JSONObject(apiResponse.text)
+                            val json = JSONObject(apiResponseText)
                             val securedLink = json.optString("securedLink").takeIf { it.isNotBlank() }?.replace("\\/", "/")
                             val videoSource = json.optString("videoSource").takeIf { it.isNotBlank() }?.replace("\\/", "/")
                             
-                            // Güvenli (MD5'li) linki tercih et, yoksa doğrudan txt linkini al.
                             val targetUrl = securedLink ?: videoSource
 
                             if (targetUrl != null) {
-                                // ExoPlayer uzantıyı tanısın diye txt ise #.m3u8 ekle
-                                val finalPlaybackUrl = if (targetUrl.endsWith(".txt")) "$targetUrl#.m3u8" else targetUrl
+                                val finalCookieStr = allCookies.entries.joinToString("; ") { "${it.key}=${it.value}" }
+                                val exoHeaders = mapOf(
+                                    "Origin" to "https://imagestoo.com",
+                                    "Referer" to normalizedIframe,
+                                    "User-Agent" to USER_AGENT,
+                                    "Cookie" to finalCookieStr
+                                )
 
+                                // Cloudstream'in altyazıları menüde gösterebilmesi için dosyadan altyazı linklerini çekiyoruz
+                                runCatching {
+                                    val masterText = app.get(targetUrl, headers = exoHeaders).text
+                                    val subRegex = Regex("""TYPE=SUBTITLES.*?URI="([^"]+)"""")
+                                    subRegex.findAll(masterText).forEach { match ->
+                                        subtitleCallback.invoke(
+                                            newSubtitleFile("Türkçe", match.groupValues[1]) {
+                                                this.headers = exoHeaders
+                                            }
+                                        )
+                                    }
+                                }
+
+                                // KRİTİK NOKTA: type = ExtractorLinkType.VIDEO
+                                // Cloudstream'e bunu M3U8 olarak değil VIDEO olarak gönderiyoruz.
+                                // Böylece Cloudstream parçalama yapmaz, doğrudan ExoPlayer'a iletir. 
+                                // ExoPlayer da içindeki hem sesi hem de görüntüyü kendi başına sorunsuz oynatır.
                                 callback.invoke(
                                     newExtractorLink(
                                         source = name,
                                         name = "Imagestoo VIP",
-                                        url = finalPlaybackUrl,
-                                        type = ExtractorLinkType.M3U8
+                                        url = targetUrl,
+                                        type = ExtractorLinkType.VIDEO 
                                     ) {
                                         this.referer = normalizedIframe
                                         this.headers = exoHeaders
