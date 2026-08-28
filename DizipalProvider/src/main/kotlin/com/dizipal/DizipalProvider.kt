@@ -34,7 +34,7 @@ class DizipalProvider : MainAPI() {
         }
     }
 
-    // 3. DETAY VE BÖLÜM LİSTESİ (İSİMLENDİRME HATALARI ÇÖZÜLDÜ)
+    // 3. DETAY VE BÖLÜM LİSTESİ
     override suspend fun load(url: String): LoadResponse {
         val document = app.get(url).document
         val ldCombined = document.select("script[type=application/ld+json]").joinToString("\n") { it.data() }
@@ -106,7 +106,7 @@ class DizipalProvider : MainAPI() {
         }
     }
 
-    // 4. VİDEO KAYNAKLARI (TÜM HATALARI BİTİREN KESİN ÇÖZÜM)
+    // 4. VİDEO KAYNAKLARI
     override suspend fun loadLinks(
         data: String,
         isCasting: Boolean,
@@ -118,7 +118,7 @@ class DizipalProvider : MainAPI() {
         val rawHtml = response.text
         val iframeLinks = mutableSetOf<String>()
 
-        // 1. GLOBAL BASE64 TARAMASI (Lohusa gibi gizli linkler)
+        // 1. BASE64 Config Taraması
         Regex("""eyJ[a-zA-Z0-9_=-]+""").findAll(rawHtml).forEach { match ->
             runCatching {
                 val decoded = String(Base64.decode(match.value, Base64.DEFAULT), Charsets.UTF_8)
@@ -131,7 +131,7 @@ class DizipalProvider : MainAPI() {
             }
         }
 
-        // 2. HTML İçi Standart Taramalar (Cem Yılmaz gibi açık linkler)
+        // 2. data-cfg & DOM Iframe Taraması
         response.document.select("[data-cfg]").forEach { elem ->
             runCatching {
                 val cfg = elem.attr("data-cfg")
@@ -151,16 +151,20 @@ class DizipalProvider : MainAPI() {
             val cleanIframe = iframeUrl.replace("&amp;", "&").trim()
             if (!cleanIframe.startsWith("http")) continue
 
-            // ----------------------------------------------------
-            // IMAGESTOO: BULMACAYI ÇÖZEN KISIM
-            // ----------------------------------------------------
+            // --- Imagestoo API İşleme ---
             if (cleanIframe.contains("imagestoo.com")) {
                 val hash = cleanIframe.substringAfter("video/").substringBefore("?").trim()
                 if (hash.isNotBlank()) {
                     val normalizedIframe = "https://imagestoo.com/video/$hash"
                     
                     val allCookies = mutableMapOf<String, String>()
-                    val iframeResp = app.get(normalizedIframe, headers = mapOf("User-Agent" to USER_AGENT, "Referer" to "$mainUrl/"))
+                    val iframeResp = app.get(
+                        url = normalizedIframe,
+                        headers = mapOf(
+                            "User-Agent" to USER_AGENT,
+                            "Referer" to "$mainUrl/"
+                        )
+                    )
                     allCookies.putAll(iframeResp.cookies)
 
                     val apiResponseText = runCatching {
@@ -196,7 +200,7 @@ class DizipalProvider : MainAPI() {
                                     "Cookie" to finalCookieStr
                                 )
 
-                                // ExoPlayer'a destek olsun diye dosyadan sadece altyazıları çekip Cloudstream'e veriyoruz
+                                // VTT Altyazı kontrolü
                                 runCatching {
                                     val masterText = app.get(targetUrl, headers = exoHeaders).text
                                     val subRegex = Regex("""TYPE=SUBTITLES.*?URI="([^"]+)"""")
@@ -209,18 +213,14 @@ class DizipalProvider : MainAPI() {
                                     }
                                 }
 
-                                // ExoPlayer uzantıyı doğrudan algılasın ve HLS (M3U8) okuyucusunu çalıştırsın diye zorluyoruz.
                                 val finalPlaybackUrl = if (targetUrl.contains(".m3u8")) targetUrl else "$targetUrl#.m3u8"
 
-                                // KRİTİK ÇÖZÜM: type = ExtractorLinkType.VIDEO
-                                // Cloudstream'in M3U8 bozucu sistemini bypass ediyoruz!
-                                // ExoPlayer uzantıyı (m3u8) görüp dosyayı kendisi, sesiyle birlikte oynatacak.
                                 callback.invoke(
                                     newExtractorLink(
                                         source = name,
-                                        name = "Imagestoo VIP (Orijinal)",
+                                        name = "Imagestoo VIP",
                                         url = finalPlaybackUrl,
-                                        type = ExtractorLinkType.VIDEO 
+                                        type = ExtractorLinkType.VIDEO
                                     ) {
                                         this.referer = normalizedIframe
                                         this.headers = exoHeaders
@@ -234,16 +234,30 @@ class DizipalProvider : MainAPI() {
                 continue 
             }
 
-            // ----------------------------------------------------
-            // DİĞER STANDART LİNKLER
-            // ----------------------------------------------------
+            // --- Standart M3U8/MP4 Doğrudan Bağlantılar ---
             if (cleanIframe.contains(".m3u8") || cleanIframe.contains(".mp4")) {
-                callback.invoke(newExtractorLink(source = name, name = "Dizipal Kaynak", url = cleanIframe, type = if (cleanIframe.contains(".m3u8")) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO) { this.referer = mainUrl })
+                callback.invoke(
+                    newExtractorLink(
+                        source = name,
+                        name = "Dizipal Kaynak",
+                        url = cleanIframe,
+                        type = if (cleanIframe.contains(".m3u8")) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
+                    ) {
+                        this.referer = mainUrl
+                    }
+                )
                 foundLinks = true
                 continue
             }
 
-            val embedResReq = runCatching { app.get(cleanIframe, headers = mapOf("User-Agent" to USER_AGENT, "Referer" to "$mainUrl/")) }.getOrNull() ?: continue
+            // --- JS Unpack & Alternatif Kaynaklar ---
+            val embedResReq = runCatching {
+                app.get(
+                    url = cleanIframe,
+                    headers = mapOf("User-Agent" to USER_AGENT, "Referer" to "$mainUrl/")
+                )
+            }.getOrNull() ?: continue
+
             val unpacked = unpackJs(embedResReq.text) ?: embedResReq.text
             val genericCookieStr = embedResReq.cookies.entries.joinToString("; ") { "${it.key}=${it.value}" }
 
@@ -257,7 +271,12 @@ class DizipalProvider : MainAPI() {
             if (extractedVideo != null) {
                 val finalVideoUrl = extractedVideo.replace("\\/", "/").replace("\\u0026", "&")
                 callback.invoke(
-                    newExtractorLink(source = name, name = "Dizipal Alternatif", url = finalVideoUrl, type = if (finalVideoUrl.contains(".m3u8")) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO) {
+                    newExtractorLink(
+                        source = name,
+                        name = "Dizipal Alternatif",
+                        url = finalVideoUrl,
+                        type = if (finalVideoUrl.contains(".m3u8")) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
+                    ) {
                         this.referer = cleanIframe
                         this.headers = mapOf(
                             "Referer" to cleanIframe, 
