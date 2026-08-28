@@ -55,10 +55,8 @@ class DizipalProvider : MainAPI() {
             ?: document.selectFirst("meta[property=og:description], meta[name=description]")?.attr("content")?.trim()
 
         val year = Regex("\"datePublished\"\\s*:\\s*\"?((?:19|20)\\d{2})\"?").find(ldCombined)?.groupValues?.get(1)?.toIntOrNull()
-        
         val imdbScore = Regex("\"ratingValue\"\\s*:\\s*\"?([0-9]+(?:\\.[0-9]+)?)\"?").find(ldCombined)?.groupValues?.get(1)?.toDoubleOrNull()
             ?: Regex("([0-9]+(?:\\.[0-9]+)?)\\s*IMDB", RegexOption.IGNORE_CASE).find(document.text())?.groupValues?.get(1)?.toDoubleOrNull()
-            
         val durationMinutes = Regex("\"duration\"\\s*:\\s*\"PT(\\d+)M\"", RegexOption.IGNORE_CASE).find(ldCombined)?.groupValues?.get(1)?.toIntOrNull()
             ?: Regex("(\\d+)\\s*dk", RegexOption.IGNORE_CASE).find(document.text())?.groupValues?.get(1)?.toIntOrNull()
 
@@ -74,45 +72,26 @@ class DizipalProvider : MainAPI() {
                 val epUrl = fixUrl(element.attr("href"))
                 val rawText = element.text()
 
-                // 1. Önce URL'den sezon ve bölüm çekmeyi deneriz (En hatasızı)
-                // 2. URL'de bulamazsa HTML içindeki metne (rawText) bakar
                 val seasonNum = Regex("-(\\d+)-sezon", RegexOption.IGNORE_CASE).find(epUrl)?.groupValues?.get(1)?.toIntOrNull()
-                    ?: Regex("(\\d+)\\.\\s*Sezon", RegexOption.IGNORE_CASE).find(rawText)?.groupValues?.get(1)?.toIntOrNull() 
-                    ?: 1
+                    ?: Regex("(\\d+)\\.\\s*Sezon", RegexOption.IGNORE_CASE).find(rawText)?.groupValues?.get(1)?.toIntOrNull() ?: 1
                     
                 val epNum = Regex("-(\\d+)-bolum", RegexOption.IGNORE_CASE).find(epUrl)?.groupValues?.get(1)?.toIntOrNull()
-                    ?: Regex("(\\d+)\\.\\s*Bölüm", RegexOption.IGNORE_CASE).find(rawText)?.groupValues?.get(1)?.toIntOrNull() 
-                    ?: (index + 1)
+                    ?: Regex("(\\d+)\\.\\s*Bölüm", RegexOption.IGNORE_CASE).find(rawText)?.groupValues?.get(1)?.toIntOrNull() ?: (index + 1)
 
-                newEpisode(epUrl) {
-                    this.season = seasonNum
-                    this.episode = epNum
-                    // name parametresi bilerek boş bırakıldı. Cloudstream varsayılan temiz tasarımı kullanacak.
-                }
+                newEpisode(epUrl) { this.season = seasonNum; this.episode = epNum }
             }
-
             newTvSeriesLoadResponse(title, url, TvType.TvSeries, episodes) {
-                this.posterUrl = poster
-                this.plot = description
-                this.year = year
-                this.score = imdbScore?.let { Score.from10(it) }
-                this.duration = durationMinutes
+                this.posterUrl = poster; this.plot = description; this.year = year; this.score = imdbScore?.let { Score.from10(it) }; this.duration = durationMinutes
             }
         } else {
             newMovieLoadResponse(title, url, TvType.Movie, url) {
-                this.posterUrl = poster
-                this.plot = description
-                this.year = year
-                this.score = imdbScore?.let { Score.from10(it) }
-                this.duration = durationMinutes
-                trailerUrl?.let {
-                    this.trailers = mutableListOf(TrailerData(it, referer = url, raw = false))
-                }
+                this.posterUrl = poster; this.plot = description; this.year = year; this.score = imdbScore?.let { Score.from10(it) }; this.duration = durationMinutes
+                trailerUrl?.let { this.trailers = mutableListOf(TrailerData(it, referer = url, raw = false)) }
             }
         }
     }
 
-    // 4. VİDEO KAYNAKLARI (M3U8 REDIRECT RESOLVER & SES DÜZELTMESİ EKLENDİ)
+    // 4. VİDEO KAYNAKLARI (M3U8 REDIRECT RESOLVER & SES DÜZELTMESİ)
     override suspend fun loadLinks(
         data: String,
         isCasting: Boolean,
@@ -146,10 +125,12 @@ class DizipalProvider : MainAPI() {
                 }
             }
         }
+        
         response.document.select("iframe, [data-frame], [data-video], [data-src]").forEach {
             val src = it.attr("data-frame").ifEmpty { it.attr("data-video") }.ifEmpty { it.attr("data-src") }.ifEmpty { it.attr("src") }
             if (src.isNotBlank() && !src.startsWith("#")) iframeLinks.add(fixUrl(src))
         }
+        
         Regex("""(?i)(?:src|iframe|file|url)\s*[:=]\s*["'](https?://[^"']+)["']""").findAll(rawHtml).forEach { iframeLinks.add(fixUrl(it.groupValues[1])) }
 
         for (iframeUrl in iframeLinks.distinct()) {
@@ -201,22 +182,32 @@ class DizipalProvider : MainAPI() {
                             val masterM3u8Req = app.get(targetUrl, headers = exoHeaders, cookies = allCookies)
                             var masterText = masterM3u8Req.text
 
-                            // 2. M3U8 dosyasının içindeki hem sesi (URI="") hem de videoyu temsil eden tüm linkleri bul
-                            val urlRegex = Regex("""https?://[^\s"']+""")
+                            // 2. M3U8 dosyasının içindeki hem sesi (URI="") hem de videoyu temsil eden tüm imagestoo linklerini bul (/m3/ veya /hls/)
+                            val urlRegex = Regex("""https?://imagestoo\.com/(?:m3|hls)/[^\s"']+""")
                             val urlsInMaster = urlRegex.findAll(masterText).map { it.value }.distinct().toList()
 
                             var hasRewritten = false
 
                             // 3. Bulunan tüm linklerin yönlendirmelerini (redirect) çöz ve orijinal listeye geri yaz
                             for (streamUrl in urlsInMaster) {
-                                if (streamUrl.contains("/m3/")) {
-                                    val resolvedReq = app.get(streamUrl, headers = exoHeaders, cookies = allCookies)
-                                    masterText = masterText.replace(streamUrl, resolvedReq.url)
-                                    hasRewritten = true
-                                }
+                                val resolvedReq = app.get(streamUrl, headers = exoHeaders, cookies = allCookies)
+                                // Yönlendirilen CDN adresini master listeye yazdırıyoruz
+                                masterText = masterText.replace(streamUrl, resolvedReq.url)
+                                hasRewritten = true
                             }
 
-                            // 4. M3U8 dosyasını bellekte Base64'e çevirip Data URI olarak oynatıcıya gönder (SES DAHİL)
+                            // 4. Ayrıca altyazıları (subtitles) yakala ve gönder (URI="https://...")
+                            val subRegex = Regex("""TYPE=SUBTITLES.*?URI="([^"]+)"""")
+                            subRegex.findAll(masterText).forEach { match ->
+                                val subUrl = match.groupValues[1]
+                                subtitleCallback.invoke(
+                                    newSubtitleFile("Türkçe (Orijinal)", subUrl) {
+                                        this.headers = mapOf("Referer" to normalizedIframe, "User-Agent" to CHROME_UA)
+                                    }
+                                )
+                            }
+
+                            // 5. M3U8 dosyasını bellekte Base64'e çevirip Data URI olarak oynatıcıya gönder (SES DAHİL)
                             val finalPlaybackUrl = if (hasRewritten) {
                                 val b64 = Base64.encodeToString(masterText.toByteArray(Charsets.UTF_8), Base64.NO_WRAP)
                                 "data:application/vnd.apple.mpegurl;base64,$b64"
